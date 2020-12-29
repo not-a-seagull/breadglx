@@ -117,16 +117,16 @@ struct DrmDevice {
 }
 
 type DrmGetVersion = unsafe extern "C" fn(c_int) -> *mut DrmVersion;
-const DRM_GET_VERSION: ConstCstr<'static> = const_cstr(&*b"drmGetVersion");
+const DRM_GET_VERSION: ConstCstr<'static> = const_cstr(&*b"drmGetVersion\0");
 
 type DrmFreeVersion = unsafe extern "C" fn(*mut DrmVersion);
-const DRM_FREE_VERSION: ConstCstr<'static> = const_cstr(&*b"drmFreeVersion");
+const DRM_FREE_VERSION: ConstCstr<'static> = const_cstr(&*b"drmFreeVersion\0");
 
 type DrmGetDevice2 = unsafe extern "C" fn(c_int, u32, *mut *mut DrmDevice) -> c_int;
-const DRM_GET_DEVICE2: ConstCstr<'static> = const_cstr(&*b"drmGetDevice2");
+const DRM_GET_DEVICE2: ConstCstr<'static> = const_cstr(&*b"drmGetDevice2\0");
 
-type DrmFreeDevice = unsafe extern "C" fn(*mut DrmDevice);
-const DRM_FREE_DEVICE: ConstCstr<'static> = const_cstr(&*b"drmFreeDevice");
+type DrmFreeDevice = unsafe extern "C" fn(*mut *mut DrmDevice);
+const DRM_FREE_DEVICE: ConstCstr<'static> = const_cstr(&*b"drmFreeDevice\0");
 
 #[inline]
 pub(crate) fn driver_name_from_kernel_name(drm: &Dll, fd: c_int) -> breadx::Result<String> {
@@ -144,10 +144,15 @@ pub(crate) fn driver_name_from_kernel_name(drm: &Dll, fd: c_int) -> breadx::Resu
     }
 
     // convert the name to a slice of c_chars
-    let name = unsafe { slice::from_raw_parts((*version).name, (*version).name_len as usize + 1) };
+    let name = unsafe {
+        slice::from_raw_parts(
+            (*version).name as *const u8,
+            (*version).name_len as usize + 1,
+        )
+    };
 
     // convert the name to its OsString equivalent
-    let name = OsString::from_vec(name.iter().map(|c| *c as u8).collect());
+    let name = OsString::from_vec(name.to_vec());
 
     // free the version data
     unsafe { (drmFreeVersion)(version) };
@@ -172,17 +177,18 @@ fn ids_from_pci_id(drm: &Dll, fd: c_int) -> Option<(c_int, c_int)> {
         return None;
     }
 
-    let mut device = NonNull::new(device).unwrap();
-    let device = unsafe { device.as_mut() };
+    let mut device_ptr = NonNull::new(device).expect("Infallible non-null ptr conversion");
+    let device = unsafe { device_ptr.as_mut() };
 
     if device.bustype != DRM_BUS_PCI {
-        unsafe { (drmFreeDevice)(device) };
+        log::warn!("Failed to get DRM PCI bus");
+        unsafe { (drmFreeDevice)(&mut device_ptr as *mut NonNull<_> as *mut _) };
         return None;
     }
 
     let vendor_id = unsafe { (*device.deviceinfo.pci).vendor_id };
     let chip_id = unsafe { (*device.deviceinfo.pci).device_id };
-    unsafe { (drmFreeDevice)(device) };
+    unsafe { (drmFreeDevice)(&mut device_ptr as *mut NonNull<_> as *mut _) };
 
     Some((vendor_id as _, chip_id as _))
 }
@@ -219,17 +225,26 @@ fn driver_name_from_pci(drm: &Dll, fd: c_int) -> breadx::Result<&'static str> {
         .ok_or_else(|| breadx::BreadError::StaticMsg("Unable to match ID to driver"))
 }
 
-const POSSIBLE_DRI_LEN: usize = 2;
+const POSSIBLE_DRI_LEN: usize = 5;
+const TARGET_TRIPLE: &str = env!("TARGET");
 
 #[inline]
 fn dri_lib_name(name: &str) -> [String; POSSIBLE_DRI_LEN] {
-    [format!("dri/{}-dri.so", name), format!("{}-dri.so", name)]
+    let target_triple = TARGET_TRIPLE.replace("unknown-", "");
+
+    [
+        format!("/usr/lib/dri/{}_dri.so", name),
+        format!("/usr/local/lib/dri/{}_dri.so", name),
+        format!("/usr/lib/{}/dri/{}_dri.so", &target_triple, name),
+        format!("/usr/local/lib/{}/dri/{}_dri.so", target_triple, name),
+        format!("{}_dri.so", name),
+    ]
 }
 
 #[inline]
 pub(crate) fn load_dri_driver(
     fd: c_int,
-    extensions: &mut Vec<*const ffi::__DRIextension>,
+    extensions: &mut Vec<ExtensionContainer>,
 ) -> breadx::Result<Dll> {
     cfg_if::cfg_if! {
         if #[cfg(feature = "async")] {
@@ -244,7 +259,12 @@ pub(crate) fn load_dri_driver(
             let dlls = dri_lib_name(&driver_name);
             let dll = Dll::load("DRI", &dlls)?;
 
-            extensions.extend_from_slice(super::extensions::load_extensions(&dll, &driver_name)?);
+            extensions.extend(
+                super::extensions::load_extensions(&dll, &driver_name)?
+                    .into_iter()
+                    .map(|ext| ExtensionContainer(*ext))
+                    .collect::<Vec<_>>()
+            );
             Ok(dll)
         }
     }
@@ -254,7 +274,7 @@ pub(crate) fn load_dri_driver(
 #[inline]
 pub(crate) async fn load_dri_driver_async(
     fd: c_int,
-    extensions: &mut Vec<*const ffi::__DRIextension>,
+    extensions: &mut Vec<ExtensionContainer>,
 ) -> breadx::Result<Dll> {
     let drm = mesa::drm_async().await?;
     let driver_name: Cow<'static, str> = {
@@ -269,7 +289,6 @@ pub(crate) async fn load_dri_driver_async(
     let dlls = dri_lib_name(&driver_name);
     let dll = blocking::unblock(move || Dll::load("DRI", &dlls)).await?;
 
-    let mut ext_container = vec![];
     let (dll, e) =
         blocking::unblock(
             move || match super::extensions::load_extensions(&dll, &driver_name) {
@@ -284,7 +303,6 @@ pub(crate) async fn load_dri_driver_async(
             },
         )
         .await?;
-    ext_container.extend(e.into_iter());
-    extensions.extend(ext_container.into_iter().map(|e| e.0));
+    extensions.extend(e.into_iter());
     Ok(dll)
 }

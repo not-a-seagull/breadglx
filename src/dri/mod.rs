@@ -9,6 +9,7 @@ pub(crate) mod extensions;
 pub(crate) mod ffi;
 pub(crate) mod load;
 
+#[derive(Debug, Copy, Clone)]
 #[repr(transparent)]
 pub(crate) struct ExtensionContainer(pub *const ffi::__DRIextension);
 

@@ -1,14 +1,21 @@
 // MIT/Apache2 License
 
-use crate::{display::GlInternalDisplay, dll::Dll, screen::GlScreen};
+use crate::{
+    display::GlInternalDisplay,
+    dll::Dll,
+    dri::dri3::Dri3Screen,
+    screen::{self, GlScreen},
+};
 use breadx::{
     display::{Connection, Display},
     error::BreadError,
 };
-use std::{fmt, marker::PhantomData, os::raw::c_int};
+use std::{boxed::Box, fmt, marker::PhantomData, os::raw::c_int};
 
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
+#[cfg(feature = "async")]
+use futures_lite::future;
 
 const PRESENT_EXT_NAME: &str = "Present";
 const DRI3_EXT_NAME: &str = "DRI3";
@@ -80,7 +87,14 @@ impl GlInternalDisplay for Dri3Display {
         dpy: &mut Display<Conn>,
         index: usize,
     ) -> breadx::Result<GlScreen> {
-        unimplemented!()
+        let (visuals, fbconfigs) = screen::get_visuals_and_fbconfigs(dpy, index)?;
+
+        Ok(GlScreen::from_dri3(
+            index,
+            visuals,
+            fbconfigs,
+            Dri3Screen::new(dpy, index)?,
+        ))
     }
 
     #[cfg(feature = "async")]
@@ -94,6 +108,12 @@ impl GlInternalDisplay for Dri3Display {
         'a: 'future,
         'b: 'future,
     {
-        unimplemented!()
+        Box::pin(async move {
+            // TODO: find a way to zip these futures together
+            let (visuals, fbconfigs) = screen::get_visuals_and_fbconfigs_async(dpy, index).await?;
+            let dri3_screen = Dri3Screen::new_async(dpy, index).await?;
+
+            Ok(GlScreen::from_dri3(index, visuals, fbconfigs, dri3_screen))
+        })
     }
 }

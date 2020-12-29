@@ -7,7 +7,7 @@ use async_lock::{RwLock, RwLockReadGuard};
 #[cfg(not(feature = "async"))]
 use parking_lot::{lock_api::RawRwLock as _, RawRwLock, RwLock, RwLockReadGuard};
 
-/// The context in which gl functions are executed.
+/// The context in which OpenGL functions are executed.
 #[repr(transparent)]
 #[derive(Clone)]
 pub struct GlContext {
@@ -18,7 +18,7 @@ pub struct GlContext {
 pub(crate) struct InnerGlContext {}
 
 /// A static memory location containing the currently active GlContext.
-/// Read: GL calls are global (unfortunately). All GL calls should be made onto
+/// GL calls are global (unfortunately). All GL calls should be made onto
 /// this context.
 /// TODO: there HAS to be a better way of doing this
 static CURRENT_CONTEXT: RwLock<Option<GlContext>> = {

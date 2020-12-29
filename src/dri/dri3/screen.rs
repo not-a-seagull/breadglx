@@ -47,6 +47,7 @@ struct Dri3ScreenInner {
 }
 
 unsafe impl Send for Dri3ScreenInner {}
+unsafe impl Sync for Dri3ScreenInner {}
 
 impl Dri3ScreenInner {
     #[inline]
@@ -129,28 +130,25 @@ impl Dri3ScreenInner {
 
 #[inline]
 fn get_bootstrap_extensions(
-    extensions: &[*const ffi::__DRIextension],
-) -> breadx::Result<(
-    *const ffi::__DRIcoreExtension,
-    *const ffi::__DRIimageDriverExtension,
-)> {
-    let mut image_driver: *const ffi::__DRIimageDriverExtension = ptr::null();
-    let mut core: *const ffi::__DRIcoreExtension = ptr::null();
+    extensions: &[ExtensionContainer],
+) -> breadx::Result<(ExtensionContainer, ExtensionContainer)> {
+    let mut image_driver = ExtensionContainer(ptr::null());
+    let mut core = ExtensionContainer(ptr::null());
 
     extensions.iter().copied().for_each(|ext| {
-        if !ext.is_null() {
-            let ext_name = unsafe { (*ext).name };
+        if !ext.0.is_null() {
+            let ext_name = unsafe { (*ext.0).name };
             let ext_name = unsafe { CStr::from_ptr(ext_name) };
 
             if ext_name.to_bytes_with_nul() == ffi::__DRI_CORE {
-                core = ext as *const _;
+                core = ext;
             } else if ext_name.to_bytes_with_nul() == ffi::__DRI_IMAGE_DRIVER {
-                image_driver = ext as *const _;
+                image_driver = ext;
             }
         }
     });
 
-    match (core.is_null(), image_driver.is_null()) {
+    match (core.0.is_null(), image_driver.0.is_null()) {
         (true, _) => Err(breadx::BreadError::StaticMsg(
             "Unable to load core driver for DRI3",
         )),
@@ -192,19 +190,20 @@ impl Dri3Screen {
         // then, open the the driver associated with the fd
         let mut extensions = vec![];
         let driver = load::load_dri_driver(fd, &mut extensions)?;
+        extensions.push(ExtensionContainer(ptr::null()));
 
         // assign the extensions that we need to bootstrap
         let (core, image_driver) = get_bootstrap_extensions(&extensions)?;
 
         // create the screen on the DRI end
         // this is done to pin the location of the screen object on the heap
-        let mut this = Box::new(Dri3ScreenInner {
+        let mut this = Arc::new(Dri3ScreenInner {
             driver,
             fd,
             is_different_gpu: false,
             dri_screen: None,
-            core,
-            image_driver,
+            core: core.0 as *const _,
+            image_driver: image_driver.0 as *const _,
             image: ptr::null(),
             flush: ptr::null(),
             config: ptr::null(),
@@ -215,13 +214,16 @@ impl Dri3Screen {
         });
 
         // use the image driver to actually create the screen
-        this.create_dri_screen(scr, fd, unsafe {
-            &mut *(extensions.as_mut_slice() as *mut [*const ffi::__DRIextension]
-                as *mut [ExtensionContainer])
-        })?;
+        Arc::get_mut(&mut this)
+            .expect("Infallible Arc::get_mut()")
+            .create_dri_screen(scr, fd, unsafe {
+                &mut *(extensions.as_mut_slice() as *mut [ExtensionContainer])
+            })?;
 
         // now we can load up the extension
-        this.get_extensions()?;
+        Arc::get_mut(&mut this)
+            .expect("Infallible Arc::get_mut()")
+            .get_extensions()?;
 
         Ok(Dri3Screen { inner: this.into() })
     }
@@ -241,19 +243,20 @@ impl Dri3Screen {
         // then, open the the driver associated with the fd
         let mut extensions = vec![];
         let driver = load::load_dri_driver_async(fd, &mut extensions).await?;
+        extensions.push(ExtensionContainer(ptr::null()));
 
         // assign the extensions that we need to bootstrap
         let (core, image_driver) = get_bootstrap_extensions(&extensions)?;
 
         // create the screen on the DRI end
         // this is done to pin the location of the screen object on the heap
-        let mut this = Box::new(Dri3ScreenInner {
+        let mut this = Arc::new(Dri3ScreenInner {
             driver,
             fd,
             is_different_gpu: false,
             dri_screen: None,
-            core,
-            image_driver,
+            core: core.0 as *const _,
+            image_driver: image_driver.0 as *const _,
             image: ptr::null(),
             flush: ptr::null(),
             config: ptr::null(),
@@ -264,20 +267,22 @@ impl Dri3Screen {
         });
 
         // use the image driver to actually create the screen
-        let exts = unsafe {
-            &mut *(extensions.as_mut_slice() as *mut [*const ffi::__DRIextension]
-                as *mut [ExtensionContainer])
-        };
-        let this = blocking::unblock(move || -> breadx::Result<Box<Dri3ScreenInner>> {
-            this.create_dri_screen(scr, fd, exts)?;
+        let this = blocking::unblock(move || -> breadx::Result<Arc<Dri3ScreenInner>> {
+            let exts = unsafe { &mut *(extensions.as_mut_slice() as *mut [ExtensionContainer]) };
+
+            Arc::get_mut(&mut this)
+                .expect("Infallible Arc::get_mut()")
+                .create_dri_screen(scr, fd, exts)?;
 
             // now we can load up the extension
-            this.get_extensions()?;
+            Arc::get_mut(&mut this)
+                .expect("Infallible Arc::get_mut()")
+                .get_extensions()?;
             Ok(this)
         })
         .await?;
 
-        Ok(Dri3Screen { inner: this.into() })
+        Ok(Dri3Screen { inner: this })
     }
 }
 

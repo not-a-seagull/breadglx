@@ -15,6 +15,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     auto_path.push("auto");
     fs::create_dir_all(&auto_path)?;
 
+    println!(
+        "cargo:rustc-env=TARGET={}",
+        env::var("TARGET").unwrap()
+    );
+
     pci_ids::process_pci_ids(&auto_path)?;
     Ok(())
 }

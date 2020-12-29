@@ -6,7 +6,10 @@ use crate::{
     indirect,
 };
 
+mod config;
 mod dispatch;
+
+pub(crate) use config::*;
 
 /// The screen used by the GL system.
 #[derive(Debug)]

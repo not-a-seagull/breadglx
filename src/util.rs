@@ -19,4 +19,4 @@ pub(crate) fn env_to_boolean(name: &str, default_val: bool) -> bool {
 
 /// Generic result type.
 #[cfg(feature = "async")]
-pub type GenericFuture<'future, T> = Pin<Box<dyn Future<Output = T> + Send + Sync + 'future>>;
+pub type GenericFuture<'future, T> = Pin<Box<dyn Future<Output = T> + Send + 'future>>;

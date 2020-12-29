@@ -20,6 +20,7 @@ where
     let mut get_ext_name: Vec<u8> =
         Vec::with_capacity(ffi::__DRI_DRIVER_GET_EXTENSIONS.len() + driver_name.len() + 1);
     get_ext_name.extend_from_slice(ffi::__DRI_DRIVER_GET_EXTENSIONS);
+    get_ext_name.retain(|b| *b != 0);
     get_ext_name.push(b'_');
     get_ext_name.extend_from_slice(driver_name.as_bytes());
 

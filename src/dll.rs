@@ -25,7 +25,7 @@ impl Dll {
     pub fn load<A: AsRef<OsStr>>(dbg_libname: &'static str, paths: &[A]) -> breadx::Result<Self> {
         let lib = match paths.iter().find_map(|path| Library::open(path).ok()) {
             Some(lib) => lib,
-            None => return Err(breadx::BreadError::StaticMsg(dbg_libname)),
+            None => return Err(breadx::BreadError::LoadLibraryFailed(dbg_libname)),
         };
 
         Ok(Self {
