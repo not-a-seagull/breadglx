@@ -1,7 +1,10 @@
 // MIT/Apache2 License
 
-use crate::{dri, indirect, mesa, screen::GlScreen, util::env_to_boolean};
-use breadx::display::{Connection, Display};
+use crate::{config::GlConfig, dri, indirect, mesa, screen::GlScreen, util::env_to_boolean};
+use breadx::{
+    display::{Connection, Display},
+    Visualtype,
+};
 use std::{marker::PhantomData, ops::Range};
 
 #[cfg(feature = "async")]
@@ -190,5 +193,11 @@ impl<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>> GlDispl
         };
 
         Ok(this)
+    }
+
+    /// Get the visual type associated with the given ID.
+    #[inline]
+    pub fn visual_for_fbconfig(&self, f: &GlConfig) -> Option<&Visualtype> {
+        self.display().visual_id_to_visual(f.visual_id as _)
     }
 }

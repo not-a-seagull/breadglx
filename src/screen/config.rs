@@ -1,10 +1,8 @@
 // MIT/Apache2 License
 
-use crate::config::GlConfig;
+use crate::config::{GlConfig, RGBA_BIT, WINDOW_BIT};
 use breadx::display::{Connection, Display};
-use std::os::raw::c_int;
-
-const RGBA_BIT: c_int = 1;
+use std::{convert::TryInto, os::raw::c_int};
 
 #[inline]
 pub(crate) fn get_visuals_and_fbconfigs<Conn: Connection>(
@@ -25,12 +23,14 @@ pub(crate) fn get_visuals_and_fbconfigs<Conn: Connection>(
             &vis.property_list,
             vis.num_properties as _,
             vis.num_visuals as _,
+            screen,
             false,
         ),
         create_configs(
             &fbs.property_list,
             fbs.num_properties as _,
             fbs.num_fb_configs as _,
+            screen,
             true,
         ),
     ))
@@ -58,12 +58,14 @@ pub(crate) async fn get_visuals_and_fbconfigs_async<Conn: Connection>(
             &vis.property_list,
             vis.num_properties as _,
             vis.num_visuals as _,
+            screen,
             false,
         ),
         create_configs(
             &fbs.property_list,
             fbs.num_properties as _,
             fbs.num_fb_configs as _,
+            screen,
             true,
         ),
     ))
@@ -74,11 +76,18 @@ fn create_configs(
     props: &[u32],
     propsize: usize,
     num_configs: usize,
+    screen: usize,
     tagged_only: bool,
 ) -> Vec<GlConfig> {
     props
         .chunks(propsize)
-        .map(|props| create_config(props, tagged_only, true))
+        .map(|props| {
+            let mut config = create_config(props, tagged_only, true);
+            config.screen = screen
+                .try_into()
+                .expect("Screen index doesn't fit in c_int");
+            config
+        })
         .take(num_configs)
         .collect()
 }
@@ -87,6 +96,7 @@ fn create_configs(
 #[inline]
 fn create_config(mut props: &[u32], tagged_only: bool, fbconfig_style_tags: bool) -> GlConfig {
     let mut config: GlConfig = Default::default();
+    config.drawable_type |= WINDOW_BIT;
 
     if !tagged_only {
         config.visual_id = props[0] as _;

@@ -1,7 +1,7 @@
 // MIT/Apache2 License
 
 use crate::{
-    config::GlConfig,
+    config::{GlConfig, GlConfigRule},
     dri::{dri2, dri3},
     indirect,
 };
@@ -71,5 +71,21 @@ impl GlScreen {
             fbconfigs,
             visuals,
         }
+    }
+
+    /// Get the framebuffer configs associated with this screen.
+    #[inline]
+    pub fn fbconfigs(&self) -> &[GlConfig] {
+        &self.fbconfigs
+    }
+
+    /// Get the framebuffer configs matching a certain set of rules.
+    #[inline]
+    pub fn choose_fbconfigs(&self, rules: &[GlConfigRule]) -> Vec<GlConfig> {
+        self.fbconfigs
+            .iter()
+            .filter(|fb| fb.fulfills_rules(rules))
+            .cloned()
+            .collect()
     }
 }

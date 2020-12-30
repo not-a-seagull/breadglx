@@ -1,18 +1,77 @@
 // MIT/Apache2 License
 
-use breadglx::GlDisplay;
-use breadx::{DisplayConnection, Result};
+use breadglx::{GlConfigRule, GlDisplay};
+use breadx::{
+    ColormapAlloc, DisplayConnection, EventMask, Pixmap, Result, WindowClass, WindowParameters,
+};
 use std::env;
 
 fn main() -> Result<()> {
     env::set_var("RUST_LOG", "breadx=warn,breadglx=info");
     env_logger::init();
 
+    // establish a connection, wrap it in a GlDisplay, and use that to produce a GlScreen
     let conn = DisplayConnection::create(None, None)?;
-    let mut conn = GlDisplay::new(conn).expect("GlDisplay");
-    let mut screen = conn
-        .create_screen(conn.display().default_screen_index())
-        .expect("GlScreen");
+    let mut conn = GlDisplay::new(conn)?;
+    let root = conn.display().default_screen().root;
+    let mut screen = conn.create_screen(conn.display().default_screen_index())?;
 
+    // find the ideal framebuffer config for our use
+    const FBCONFIG_RULES: &[GlConfigRule] = &[
+        GlConfigRule::XRenderable(1),
+        GlConfigRule::DrawableType(breadglx::WINDOW_BIT),
+        GlConfigRule::RenderType(breadglx::RGBA_BIT),
+        GlConfigRule::VisualType(breadglx::TRUE_COLOR),
+        GlConfigRule::RedBits(8),
+        GlConfigRule::GreenBits(8),
+        GlConfigRule::BlueBits(8),
+        GlConfigRule::AlphaBits(8),
+        GlConfigRule::DepthBits(24),
+        GlConfigRule::StencilBits(8),
+        GlConfigRule::DoubleBufferMode(1),
+    ];
+
+    let fbconfig = screen
+        .choose_fbconfigs(FBCONFIG_RULES)
+        .into_iter()
+        .max_by_key(|fbconfig| fbconfig.samples)
+        .expect("Could not find valid framebuffer config");
+
+    // get the visual information associated with that fbconfig
+    let vis = conn
+        .visual_for_fbconfig(&fbconfig)
+        .expect("Could not match visual to fbconfig");
+    let depth = conn.display().depth_of_visual(vis.visual_id).unwrap();
+    let vis = vis.visual_id;
+
+    // create a colormap identified with the chosen visual style
+    let cmap = conn
+        .display_mut()
+        .create_colormap(root, vis, ColormapAlloc::None)?;
+
+    // create a window
+    let wp = WindowParameters {
+        colormap: Some(cmap),
+        background_pixmap: Some(Pixmap::const_from_xid(0)),
+        border_pixel: Some(0),
+        event_mask: Some(EventMask::STRUCTURE_NOTIFY),
+        ..Default::default()
+    };
+    let win = conn.display_mut().create_window(
+        root,
+        WindowClass::InputOutput,
+        Some(depth),
+        Some(vis),
+        0,
+        0,
+        640,
+        400,
+        0,
+        wp,
+    )?;
+
+    // set up the window's properties
+    win.set_title(conn.display_mut(), "BreadGLX Demonstration")?;
+    win.map(conn.display_mut())?;
     Ok(())
 }
