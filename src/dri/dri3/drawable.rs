@@ -185,16 +185,21 @@ fn create_the_drawable(
     config: &GlConfig,
     drawable: Drawable,
 ) -> breadx::Result<DriDrawablePtr> {
+    let config = match screen.driconfig_from_fbconfig(&config) {
+        Some(config) => config.as_ptr(),
+        None => {
+            return Err(breadx::BreadError::StaticMsg(
+                "Config doesn't match any in DRIconfig set",
+            ))
+        }
+    };
     let dri_drawable = unsafe {
         ((*screen.inner.image_driver)
             .createNewDrawable
             .expect("createNewDrawable not present"))(
             screen.dri_screen().as_ptr(),
-            match screen.driconfig_from_fbconfig(&config) {
-                Some(config) => config.as_ptr(),
-                None => ptr::null(),
-            },
-            drawable.xid as _,
+            config,
+            ptr::null_mut(),
         )
     };
     let dri_drawable = NonNull::new(dri_drawable).ok_or(breadx::BreadError::StaticMsg(

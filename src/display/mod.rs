@@ -136,8 +136,12 @@ impl<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>> GlDispl
                 let repl = self
                     .display_mut()
                     .get_drawable_properties_immediate(drawable.into())?;
-                self.drawable_properties
-                    .insert(drawable, repl.chunks(2).map(|kv| (kv[0], kv[1])).collect());
+                let propmap: HashMap<u32, u32> = repl.chunks(2).map(|kv| (kv[0], kv[1])).collect();
+                println!("Propmap for {:?}: ", drawable);
+                propmap
+                    .iter()
+                    .for_each(|(p, x)| println!("- {:X}: {:X}", p, x));
+                self.drawable_properties.insert(drawable, propmap);
                 self.drawable_properties
                     .get(&drawable)
                     .expect("Infallible HashMap::get()")

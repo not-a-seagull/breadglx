@@ -22,11 +22,18 @@ use tinyvec::ArrayVec;
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
 
-#[derive(Debug, Clone)]
-pub struct Dri3Context {
+#[derive(Debug)]
+struct Dri3ContextInner {
     dri_context: NonNull<ffi::__DRIcontext>,
     // Dri3Screen is wrapped in an Arc, we can keep a sneaky reference here
     screen: Dri3Screen,
+    fbconfig: GlConfig,
+}
+
+#[derive(Debug, Clone)]
+#[repr(transparent)]
+pub struct Dri3Context {
+    inner: Arc<Dri3ContextInner>,
 }
 
 unsafe impl Send for Dri3Context {}
@@ -36,7 +43,7 @@ impl Dri3Context {
     #[inline]
     fn new_internal(
         screen: Dri3Screen,
-        fbconfig: &GlConfig,
+        fbconfig: GlConfig,
         rules: &[GlContextRule],
         share: Option<&GlContext>,
         base: &Arc<InnerGlContext>,
@@ -57,7 +64,7 @@ impl Dri3Context {
                 .expect("Unable to find createContextAttribs"))(
                 screen.dri_screen().as_ptr(),
                 rules.api as _,
-                match screen.driconfig_from_fbconfig(fbconfig) {
+                match screen.driconfig_from_fbconfig(&fbconfig) {
                     Some(screen) => screen.as_ptr(),
                     None => ptr::null(),
                 },
@@ -72,10 +79,13 @@ impl Dri3Context {
         };
 
         Ok(Self {
-            dri_context: NonNull::new(dri_context).ok_or(breadx::BreadError::StaticMsg(
-                "Failed to initialize DRI3 context",
-            ))?,
-            screen,
+            inner: Arc::new(Dri3ContextInner {
+                dri_context: NonNull::new(dri_context).ok_or(breadx::BreadError::StaticMsg(
+                    "Failed to initialize DRI3 context",
+                ))?,
+                screen,
+                fbconfig,
+            }),
         })
     }
 
@@ -87,7 +97,7 @@ impl Dri3Context {
         share: Option<&GlContext>,
         base: &mut Arc<InnerGlContext>,
     ) -> breadx::Result<Dri3Context> {
-        Self::new_internal(scr.clone(), fbconfig, rules, share, base)
+        Self::new_internal(scr.clone(), fbconfig.clone(), rules, share, base)
     }
 
     #[cfg(feature = "async")]
@@ -105,13 +115,23 @@ impl Dri3Context {
         let rules = rules.to_vec();
         let share = share.cloned();
         let base = base.clone();
-        blocking::unblock(move || Self::new_internal(scr, &fbconfig, &rules, share.as_ref(), &base))
+        blocking::unblock(move || Self::new_internal(scr, fbconfig, &rules, share.as_ref(), &base))
             .await
     }
 
     #[inline]
     fn dri_context(&self) -> NonNull<ffi::__DRIcontext> {
-        self.dri_context
+        self.inner.dri_context
+    }
+
+    #[inline]
+    fn screen(&self) -> &Dri3Screen {
+        &self.inner.screen
+    }
+
+    #[inline]
+    pub fn fbconfig(&self) -> Option<&GlConfig> {
+        Some(&self.inner.fbconfig)
     }
 }
 
@@ -125,20 +145,20 @@ impl GlInternalContext for Dri3Context {
     ) -> breadx::Result {
         // get the DRI drawable equivalent to read and draw
         let read = match read {
-            Some(read) => Some(self.screen.fetch_dri_drawable(dpy, read)?),
+            Some(read) => Some(self.screen().fetch_dri_drawable(dpy, self, read)?),
             None => None,
         };
         let draw = match draw {
-            Some(draw) => Some(self.screen.fetch_dri_drawable(dpy, draw)?),
+            Some(draw) => Some(self.screen().fetch_dri_drawable(dpy, self, draw)?),
             None => None,
         };
 
         // bind the context to the OpenGL driver
         if unsafe {
-            ((*self.screen.inner.core)
+            ((*self.screen().inner.core)
                 .bindContext
                 .expect("bindContext not present"))(
-                self.dri_context.as_ptr(),
+                self.dri_context().as_ptr(),
                 match draw {
                     Some(ref draw) => draw.dri_drawable().as_ptr(),
                     None => ptr::null_mut(),
@@ -192,11 +212,19 @@ impl GlInternalContext for Dri3Context {
         Box::pin(async move {
             // get the DRI drawable equivalent to read and draw
             let read = match read {
-                Some(read) => Some(self.screen.fetch_dri_drawable_async(dpy, read).await?),
+                Some(read) => Some(
+                    self.screen()
+                        .fetch_dri_drawable_async(dpy, self, read)
+                        .await?,
+                ),
                 None => None,
             };
             let draw = match draw {
-                Some(draw) => Some(self.screen.fetch_dri_drawable_async(dpy, draw).await?),
+                Some(draw) => Some(
+                    self.screen()
+                        .fetch_dri_drawable_async(dpy, self, draw)
+                        .await?,
+                ),
                 None => None,
             };
 
@@ -205,7 +233,7 @@ impl GlInternalContext for Dri3Context {
             let read2 = read.clone();
             let draw2 = draw.clone();
             let res = blocking::unblock(move || unsafe {
-                ((*this.screen.inner.core)
+                ((*this.screen().inner.core)
                     .bindContext
                     .expect("bindContext not present"))(
                     this.dri_context.as_ptr(),
@@ -247,9 +275,9 @@ impl GlInternalContext for Dri3Context {
     #[inline]
     fn unbind(&self) -> breadx::Result<()> {
         unsafe {
-            ((*self.screen.inner.core)
+            ((*self.screen().inner.core)
                 .unbindContext
-                .expect("unbindContext not present"))(self.dri_context.as_ptr())
+                .expect("unbindContext not present"))(self.dri_context().as_ptr())
         };
         Ok(())
     }

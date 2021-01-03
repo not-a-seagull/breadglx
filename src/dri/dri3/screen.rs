@@ -1,6 +1,6 @@
 // MIT/Apache2 License
 
-use super::{super::ExtensionContainer, Dri3Drawable};
+use super::{super::ExtensionContainer, Dri3Context, Dri3Drawable};
 use crate::{
     config::{GlConfig, GLX_FBCONFIG_ID},
     context::{dispatch::ContextDispatch, GlContext, GlContextRule, InnerGlContext},
@@ -144,6 +144,19 @@ impl Dri3ScreenInner {
         };
         let dri_screen = NonNull::new(dri_screen)
             .ok_or(breadx::BreadError::StaticMsg("Failed to create DRI screen"))?;
+
+        if driver_configs.is_null() {
+            return Err(breadx::BreadError::StaticMsg(
+                "createNewScreen2 did not return driver configurations",
+            ));
+        }
+
+        if unsafe { *driver_configs }.is_null() {
+            return Err(breadx::BreadError::StaticMsg(
+                "createNewScreen2 returned 0 driver configurations",
+            ));
+        }
+
         self.dri_screen = Some(dri_screen);
         self.driver_configs = driver_configs;
         Ok(())
@@ -278,6 +291,7 @@ impl Dri3Screen {
                 thisref.driver_configs,
             )
         });
+        println!("{:?}", &extmap);
 
         thisref.dri_configmap = Some(extmap);
 
@@ -371,20 +385,24 @@ impl Dri3Screen {
     >(
         &self,
         dpy: &mut GlDisplay<Conn, Dpy>,
+        context: &Dri3Context,
         drawable: Drawable,
     ) -> breadx::Result<Arc<Dri3Drawable>> {
         match self.inner.drawable_map.get(&drawable) {
             Some(d) => Ok(d.clone()),
             None => {
-                let fbconfig = dpy
-                    .load_drawable_property(drawable, GLX_FBCONFIG_ID)?
-                    .and_then(|fbid| {
-                        self.inner
-                            .fbconfigs
-                            .iter()
-                            .find(|f| f.fbconfig_id == fbid as c_int)
-                    })
-                    .ok_or(breadx::BreadError::StaticMsg("Failed to find FbConfig ID"))?;
+                let fbconfig = match context.fbconfig() {
+                    Some(fbc) => fbc,
+                    None => dpy
+                        .load_drawable_property(drawable, GLX_FBCONFIG_ID)?
+                        .and_then(|fbid| {
+                            self.inner
+                                .fbconfigs
+                                .iter()
+                                .find(|f| f.fbconfig_id == fbid as c_int)
+                        })
+                        .ok_or(breadx::BreadError::StaticMsg("Failed to find FbConfig ID"))?,
+                };
                 let d = Arc::new(Dri3Drawable::new(
                     dpy.display_mut(),
                     drawable,
@@ -406,21 +424,25 @@ impl Dri3Screen {
     >(
         &self,
         dpy: &mut GlDisplay<Conn, Dpy>,
+        context: &Dri3Context,
         drawable: Drawable,
     ) -> breadx::Result<Arc<Dri3Drawable>> {
         match self.inner.drawable_map.get(&drawable) {
             Some(d) => Ok(d.clone()),
             None => {
-                let fbconfig = dpy
-                    .load_drawable_property_async(drawable, GLX_FBCONFIG_ID)
-                    .await?
-                    .and_then(|fbid| {
-                        self.inner
-                            .fbconfigs
-                            .iter()
-                            .find(|f| f.fbconfig_id == fbid as c_int)
-                    })
-                    .ok_or(breadx::BreadError::StaticMsg("Failed to find FbConfig ID"))?;
+                let fbconfig = match context.fbconfig() {
+                    Some(fbconfig) => fbconfig,
+                    None => dpy
+                        .load_drawable_property_async(drawable, GLX_FBCONFIG_ID)
+                        .await?
+                        .and_then(|fbid| {
+                            self.inner
+                                .fbconfigs
+                                .iter()
+                                .find(|f| f.fbconfig_id == fbid as c_int)
+                        })
+                        .ok_or(breadx::BreadError::StaticMsg("Failed to find FbConfig ID"))?,
+                };
                 let d = Arc::new(
                     Dri3Drawable::new_async(
                         dpy.display_mut(),

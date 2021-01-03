@@ -8,7 +8,7 @@ use breadx::{
 use std::env;
 
 fn main() -> Result<()> {
-    env::set_var("RUST_LOG", "breadx=warn,breadglx=info");
+    env::set_var("RUST_LOG", "breadx=warn,breadglx=debug");
     env_logger::init();
 
     // establish a connection, wrap it in a GlDisplay, and use that to produce a GlScreen

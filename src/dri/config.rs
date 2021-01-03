@@ -116,7 +116,14 @@ fn config_seg_equal(config: &GlConfig, attrib: c_uint, value: c_uint) -> bool {
             0
         };
 
-        config.render_type == equivalent
+        let res = config.render_type == equivalent;
+        if !res {
+            log::debug!(
+                "Config of ID {} failed on __DRI_ATTRIB_RENDER_TYPE",
+                config.fbconfig_id
+            );
+        }
+        res
     } else if attrib == ffi::__DRI_ATTRIB_CONFIG_CAVEAT {
         let equivalent = if value & ffi::__DRI_ATTRIB_NON_CONFORMANT_CONFIG != 0 {
             NON_CONFORMANT_CONFIG
@@ -126,7 +133,14 @@ fn config_seg_equal(config: &GlConfig, attrib: c_uint, value: c_uint) -> bool {
             CFG_NONE
         };
 
-        config.visual_rating == equivalent
+        let res = config.visual_rating == equivalent;
+        if !res {
+            log::debug!(
+                "Config of ID {:X} failed on __DRI_ATTRIB_CONFIG_CAVEAT",
+                config.fbconfig_id
+            );
+        }
+        res
     } else if attrib == ffi::__DRI_ATTRIB_BIND_TO_TEXTURE_TARGETS {
         let equivalent = if value & ffi::__DRI_ATTRIB_TEXTURE_1D_BIT != 0 {
             TEXTURE_1D_BIT_EXT
@@ -142,7 +156,15 @@ fn config_seg_equal(config: &GlConfig, attrib: c_uint, value: c_uint) -> bool {
             0
         };
 
-        config.bind_to_texture_targets == DONT_CARE || config.bind_to_texture_targets == equivalent
+        let res = config.bind_to_texture_targets == DONT_CARE
+            || config.bind_to_texture_targets == equivalent;
+        if !res {
+            log::debug!(
+                "Config of ID {:X} failed on __DRI_ATTRIB_BIND_TO_TEXTURE_TARGETS",
+                config.fbconfig_id
+            );
+        }
+        res
     } else if attrib == ffi::__DRI_ATTRIB_SWAP_METHOD {
         let equivalent = if value == ffi::__DRI_ATTRIB_SWAP_EXCHANGE {
             SWAP_EXCHANGE_OML as c_uint
@@ -160,7 +182,7 @@ fn config_seg_equal(config: &GlConfig, attrib: c_uint, value: c_uint) -> bool {
 
 #[inline]
 fn raw_compare(config: &GlConfig, attrib: c_uint, value: c_uint) -> bool {
-    ATTRIB_CONVERTERS
+    let res = ATTRIB_CONVERTERS
         .iter()
         .find_map(|a| {
             if a.attrib == attrib {
@@ -170,7 +192,13 @@ fn raw_compare(config: &GlConfig, attrib: c_uint, value: c_uint) -> bool {
                 None
             }
         })
-        .unwrap_or(true)
+        .unwrap_or(true);
+    if !res {
+        log::debug!("Config of ID 0x{:X} failed on 0x{:X}", config.fbconfig_id, attrib);
+    } else if res && attrib == 1 {
+        println!("Config succeeded on 1");
+    }
+    res
 }
 
 type ConfigIndexer = for<'a> fn(&'a GlConfig) -> &'a c_uint;
