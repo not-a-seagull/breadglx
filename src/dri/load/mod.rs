@@ -246,28 +246,22 @@ pub(crate) fn load_dri_driver(
     fd: c_int,
     extensions: &mut Vec<ExtensionContainer>,
 ) -> breadx::Result<Dll> {
-    cfg_if::cfg_if! {
-        if #[cfg(feature = "async")] {
-            async_io::block_on(load_dri_driver_async(fd, extensions))
-        } else {
-            let drm = mesa::drm()?;
-            let driver_name: Cow<'static, str> = match driver_name_from_pci(drm, fd) {
-                Ok(driver) => driver.into(),
-                Err(_) => driver_name_from_kernel_name(drm, fd)?.into(),
-            };
+    let drm = mesa::drm()?;
+    let driver_name: Cow<'static, str> = match driver_name_from_pci(drm, fd) {
+        Ok(driver) => driver.into(),
+        Err(_) => driver_name_from_kernel_name(drm, fd)?.into(),
+    };
 
-            let dlls = dri_lib_name(&driver_name);
-            let dll = Dll::load("DRI", &dlls)?;
+    let dlls = dri_lib_name(&driver_name);
+    let dll = Dll::load("DRI", &dlls)?;
 
-            extensions.extend(
-                super::extensions::load_extensions(&dll, &driver_name)?
-                    .into_iter()
-                    .map(|ext| ExtensionContainer(*ext))
-                    .collect::<Vec<_>>()
-            );
-            Ok(dll)
-        }
-    }
+    extensions.extend(
+        super::extensions::load_extensions(&dll, &driver_name)?
+            .into_iter()
+            .map(|ext| ExtensionContainer(*ext))
+            .collect::<Vec<_>>(),
+    );
+    Ok(dll)
 }
 
 #[cfg(feature = "async")]

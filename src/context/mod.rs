@@ -1,6 +1,18 @@
 // MIT/Apache2 License
 
+use super::{config::GlConfig, display::GlDisplay};
+use breadx::{
+    auto::glx,
+    display::{Connection, Display},
+    Drawable,
+};
 use std::{mem, sync::Arc};
+
+#[cfg(feature = "async")]
+use crate::util::GenericFuture;
+
+pub(crate) mod dispatch;
+pub(crate) use dispatch::ContextDispatch;
 
 #[cfg(feature = "async")]
 use async_lock::{RwLock, RwLockReadGuard};
@@ -11,11 +23,201 @@ use parking_lot::{lock_api::RawRwLock as _, RawRwLock, RwLock, RwLockReadGuard};
 #[repr(transparent)]
 #[derive(Clone)]
 pub struct GlContext {
-    inner: Arc<InnerGlContext>,
+    pub(crate) inner: Arc<InnerGlContext>,
 }
 
-#[derive(Default)]
-pub(crate) struct InnerGlContext {}
+pub(crate) struct InnerGlContext {
+    // xid relating to the current contex
+    xid: glx::Context,
+    // the screen associated with this context
+    screen: usize,
+    // framebuffer config associated with this context
+    fbconfig: GlConfig,
+    // inner mechanism
+    inner: dispatch::ContextDispatch,
+}
+
+pub(crate) trait GlInternalContext {
+    /// Bind this context to the given drawable.
+    fn bind<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>>(
+        &self,
+        dpy: &mut GlDisplay<Conn, Dpy>,
+        read: Option<Drawable>,
+        draw: Option<Drawable>,
+    ) -> breadx::Result<()>;
+
+    #[cfg(feature = "async")]
+    fn bind_async<
+        'future,
+        'a,
+        'b,
+        Conn: Connection,
+        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>> + Send,
+    >(
+        &'a self,
+        dpy: &'b mut GlDisplay<Conn, Dpy>,
+        read: Option<Drawable>,
+        draw: Option<Drawable>,
+    ) -> GenericFuture<'future, breadx::Result<()>>
+    where
+        'a: 'future,
+        'b: 'future;
+
+    fn unbind(&self) -> breadx::Result<()>;
+
+    #[cfg(feature = "async")]
+    fn unbind_async<'future>(&'future self) -> GenericFuture<'future, breadx::Result<()>>;
+}
+
+impl GlContext {
+    #[inline]
+    pub(crate) fn dispatch(&self) -> &dispatch::ContextDispatch {
+        &self.inner.inner
+    }
+
+    #[inline]
+    pub(crate) fn new(xid: glx::Context, screen: usize, fbconfig: GlConfig) -> Self {
+        Self {
+            inner: Arc::new(InnerGlContext {
+                xid,
+                screen,
+                fbconfig,
+                inner: ContextDispatch::Placeholder,
+            }),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn set_dispatch(&mut self, disp: ContextDispatch) {
+        Arc::get_mut(&mut self.inner)
+            .expect("Infallible Arc::get_mut()")
+            .inner = disp;
+    }
+
+    #[inline]
+    fn bind_internal<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>>(
+        &self,
+        dpy: &mut GlDisplay<Conn, Dpy>,
+        read: Option<Drawable>,
+        draw: Option<Drawable>,
+    ) -> breadx::Result<Option<GlContext>> {
+        // get this and unbind the old
+        let old_gc = get_current_context();
+
+        if let Some(old_gc) = &*old_gc {
+            if Arc::ptr_eq(&self.inner, &old_gc.inner) {
+                log::warn!("Attempted to set currently active GlContext as active.");
+                return Ok(None);
+            }
+        }
+
+        self.inner.inner.bind(dpy, read, draw)?;
+        if let Some(old_gc) = &*old_gc {
+            old_gc.inner.inner.unbind()?;
+        }
+
+        // bind the current gc to the old one
+        mem::drop(old_gc);
+        let old_gc = set_current_context(self.clone());
+        Ok(old_gc)
+    }
+
+    #[cfg(feature = "async")]
+    #[inline]
+    async fn bind_internal_async<
+        Conn: Connection,
+        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>,
+    >(
+        &self,
+        dpy: &mut GlDisplay<Conn, Dpy>,
+        read: Option<Drawable>,
+        draw: Option<Drawable>,
+    ) -> breadx::Result<Option<GlContext>> {
+        // get this and unbind the old
+        let old_gc = get_current_context_async().await;
+
+        if let Some(old_gc) = &*old_gc {
+            if Arc::ptr_eq(&self.inner, &old_gc.inner) {
+                log::warn!("Attempted to set currently active GlContext as active.");
+                return Ok(None);
+            }
+        }
+
+        self.inner.inner.bind_async(dpy, read, draw).await?;
+        if let Some(old_gc) = &*old_gc {
+            old_gc.inner.inner.unbind_async().await?;
+        }
+
+        // bind the current gc to the old one
+        mem::drop(old_gc);
+        let old_gc = set_current_context_async(self.clone()).await;
+        Ok(old_gc)
+    }
+
+    #[inline]
+    pub fn bind<
+        Conn: Connection,
+        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>,
+        Target: Into<Drawable>,
+    >(
+        &self,
+        dpy: &mut GlDisplay<Conn, Dpy>,
+        draw: Target,
+    ) -> breadx::Result<Option<GlContext>> {
+        let draw = draw.into();
+        self.bind_internal(dpy, Some(draw), Some(draw))
+    }
+
+    #[cfg(feature = "async")]
+    #[inline]
+    pub async fn bind_async<
+        Conn: Connection,
+        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>,
+        Target: Into<Drawable>,
+    >(
+        &self,
+        dpy: &mut GlDisplay<Conn, Dpy>,
+        draw: Target,
+    ) -> breadx::Result<Option<GlContext>> {
+        let draw = draw.into();
+        self.bind_internal_async(dpy, Some(draw), Some(draw)).await
+    }
+}
+
+/// Rules for the context.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum GlContextRule {
+    MajorVersion(i32),
+    MinorVersion(i32),
+    Flags(u32),
+    NoError(bool),
+    Profile(Profile),
+    RenderType(u32),
+    ResetNotificationStrategy(ResetNotificationStrategy),
+    ReleaseBehavior(ReleaseBehavior),
+}
+
+/// Profile for the context.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum Profile {
+    Core,
+    Compatibility,
+    Es,
+}
+
+/// Reset notification strategy for the context.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum ResetNotificationStrategy {
+    NoNotification,
+    LoseContext,
+}
+
+/// Release behavior for the context.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum ReleaseBehavior {
+    None,
+    Flush,
+}
 
 /// A static memory location containing the currently active GlContext.
 /// GL calls are global (unfortunately). All GL calls should be made onto

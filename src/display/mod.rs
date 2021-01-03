@@ -3,9 +3,9 @@
 use crate::{config::GlConfig, dri, indirect, mesa, screen::GlScreen, util::env_to_boolean};
 use breadx::{
     display::{Connection, Display},
-    Visualtype,
+    Drawable, Visualtype,
 };
-use std::{marker::PhantomData, ops::Range};
+use std::{collections::HashMap, marker::PhantomData, ops::Range};
 
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
@@ -23,6 +23,9 @@ pub struct GlDisplay<Conn, Dpy> {
 
     // the underlying GL rendering method
     context: dispatch::DisplayDispatch,
+
+    // cache that maps the drawables to a map of their properties
+    drawable_properties: HashMap<Drawable, HashMap<u32, u32>>,
 
     // needed to satisfy type constraints
     _phantom: PhantomData<Conn>,
@@ -45,6 +48,18 @@ pub(crate) trait GlInternalDisplay {
     where
         'a: 'future,
         'b: 'future;
+}
+
+impl<Conn, Dpy> GlDisplay<Conn, Dpy> {
+    #[inline]
+    pub fn inner(&self) -> &Dpy {
+        &self.display
+    }
+
+    #[inline]
+    pub fn inner_mut(&mut self) -> &mut Dpy {
+        &mut self.display
+    }
 }
 
 impl<Conn: Connection, Dpy: AsRef<Display<Conn>>> GlDisplay<Conn, Dpy> {
@@ -108,6 +123,56 @@ impl<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>> GlDispl
             .await
     }
 
+    /// Load a drawable's property.
+    #[inline]
+    pub(crate) fn load_drawable_property(
+        &mut self,
+        drawable: Drawable,
+        property: u32,
+    ) -> breadx::Result<Option<u32>> {
+        let map = match self.drawable_properties.get(&drawable) {
+            Some(map) => map,
+            None => {
+                let repl = self
+                    .display_mut()
+                    .get_drawable_properties_immediate(drawable.into())?;
+                self.drawable_properties
+                    .insert(drawable, repl.chunks(2).map(|kv| (kv[0], kv[1])).collect());
+                self.drawable_properties
+                    .get(&drawable)
+                    .expect("Infallible HashMap::get()")
+            }
+        };
+
+        Ok(map.get(&property).copied())
+    }
+
+    /// Load a drawable's property, async redox.
+    #[cfg(feature = "async")]
+    #[inline]
+    pub(crate) async fn load_drawable_property_async(
+        &mut self,
+        drawable: Drawable,
+        property: u32,
+    ) -> breadx::Result<Option<u32>> {
+        let map = match self.drawable_properties.get(&drawable) {
+            Some(map) => map,
+            None => {
+                let repl = self
+                    .display_mut()
+                    .get_drawable_properties_immediate_async(drawable.into())
+                    .await?;
+                self.drawable_properties
+                    .insert(drawable, repl.chunks(2).map(|kv| (kv[0], kv[1])).collect());
+                self.drawable_properties
+                    .get(&drawable)
+                    .expect("Infallible HashMap::get()")
+            }
+        };
+
+        Ok(map.get(&property).copied())
+    }
+
     #[inline]
     pub fn new(mut dpy: Dpy) -> breadx::Result<Self> {
         // create the basic display
@@ -143,6 +208,7 @@ impl<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>> GlDispl
             direct: stats.direct,
             accel: stats.accel,
             context,
+            drawable_properties: HashMap::new(),
             _phantom: PhantomData,
         };
 
@@ -189,6 +255,7 @@ impl<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>> GlDispl
             direct: stats.direct,
             accel: stats.accel,
             context,
+            drawable_properties: HashMap::new(),
             _phantom: PhantomData,
         };
 

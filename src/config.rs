@@ -1,8 +1,15 @@
 // MIT/Apache2 License
 
+use breadx::VisualClass;
 use std::os::raw::{c_int, c_uint};
 
-pub const RGBA_BIT: c_int = 1;
+pub const GLX_FBCONFIG_ID: u32 = 0x8013;
+
+pub const RGBA_BIT: c_int = 0x1;
+pub const RGBA_TYPE: c_int = 0x8014;
+pub const COLOR_INDEX_BIT: c_int = 0x2;
+pub const RGBA_FLOAT_BIT_ARB: c_int = 0x4;
+pub const RGBA_UNSIGNED_FLOAT_BIT_EXT: c_int = 0x8;
 pub const WINDOW_BIT: c_int = 1;
 pub const CFG_NONE: c_int = 0x8000;
 pub const TRANSPARENT_RGB: c_int = 0x8008;
@@ -13,9 +20,20 @@ pub const PSEUDO_COLOR: c_int = 0x8004;
 pub const STATIC_COLOR: c_int = 0x8005;
 pub const GRAY_SCALE: c_int = 0x8006;
 pub const STATIC_GRAY: c_int = 0x8007;
+pub const SLOW_CONFIG: c_int = 0x8001;
+pub const NON_CONFORMANT_CONFIG: c_int = 0x800D;
+pub const SWAP_EXCHANGE_OML: c_int = 0x8061;
+pub const SWAP_COPY_OML: c_int = 0x8062;
+pub const SWAP_UNDEFINED_OML: c_int = 0x8063;
+pub const TEXTURE_1D_BIT_EXT: c_int = 0x1;
+pub const TEXTURE_2D_BIT_EXT: c_int = 0x2;
+pub const TEXTURE_RECTANGLE_BIT_EXT: c_int = 0x4;
+pub const DONT_CARE: c_int = std::i32::MAX;
+
+// FUTURE NOTE: rewrite with DONT_CARE in mind
 
 /// Configuration of visual or framebuffer info.
-#[derive(Default, Debug, Copy, Clone)]
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct GlConfig {
     pub double_buffer_mode: c_uint,
@@ -101,7 +119,7 @@ pub enum GlConfigRule {
     NumAuxBuffers(c_int),
     Level(c_int),
     VisualId(c_int),
-    VisualType(c_int),
+    VisualType(VisualClass),
     VisualRating(c_int),
     TransparentPixel(c_int),
     TransparentRed(c_int),
@@ -136,7 +154,7 @@ impl GlConfig {
     pub fn fulfills_rule(&self, rule: &GlConfigRule, matching_on_rgb: c_int) -> bool {
         match rule {
             GlConfigRule::DoubleBufferMode(dbm) => self.double_buffer_mode == *dbm,
-            GlConfigRule::VisualType(vt) => self.visual_type == *vt,
+            GlConfigRule::VisualType(vt) => self.visual_type == *vt as _,
             GlConfigRule::VisualRating(vr) => self.visual_rating == *vr,
             GlConfigRule::XRenderable(xr) => self.x_renderable == *xr,
             GlConfigRule::FbconfigId(fi) => self.fbconfig_id == *fi,
@@ -227,8 +245,13 @@ impl GlConfig {
             .unwrap_or(0);
 
         // then, iterate over the rules
-        rules
-            .iter()
-            .all(|glr| self.fulfills_rule(glr, matching_on_rgb))
+        rules.iter().all(|glr| {
+            if self.fulfills_rule(glr, matching_on_rgb) {
+                true
+            } else {
+                log::trace!("GlConfig failed on rule: {:?}", &glr);
+                false
+            }
+        })
     }
 }

@@ -18,6 +18,7 @@ pub mod drawable;
 pub mod screen;
 
 pub use config::*;
+pub use context::*;
 pub use display::*;
 pub use screen::*;
 

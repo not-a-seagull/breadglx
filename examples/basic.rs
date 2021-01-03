@@ -1,8 +1,9 @@
 // MIT/Apache2 License
 
-use breadglx::{GlConfigRule, GlDisplay};
+use breadglx::{GlConfigRule, GlContextRule, GlDisplay};
 use breadx::{
-    ColormapAlloc, DisplayConnection, EventMask, Pixmap, Result, WindowClass, WindowParameters,
+    ColormapAlloc, DisplayConnection, EventMask, Pixmap, Result, VisualClass, WindowClass,
+    WindowParameters,
 };
 use std::env;
 
@@ -18,10 +19,9 @@ fn main() -> Result<()> {
 
     // find the ideal framebuffer config for our use
     const FBCONFIG_RULES: &[GlConfigRule] = &[
-        GlConfigRule::XRenderable(1),
         GlConfigRule::DrawableType(breadglx::WINDOW_BIT),
         GlConfigRule::RenderType(breadglx::RGBA_BIT),
-        GlConfigRule::VisualType(breadglx::TRUE_COLOR),
+        GlConfigRule::VisualType(VisualClass::TrueColor),
         GlConfigRule::RedBits(8),
         GlConfigRule::GreenBits(8),
         GlConfigRule::BlueBits(8),
@@ -29,6 +29,7 @@ fn main() -> Result<()> {
         GlConfigRule::DepthBits(24),
         GlConfigRule::StencilBits(8),
         GlConfigRule::DoubleBufferMode(1),
+        //        GlConfigRule::XRenderable(1),
     ];
 
     let fbconfig = screen
@@ -73,5 +74,27 @@ fn main() -> Result<()> {
     // set up the window's properties
     win.set_title(conn.display_mut(), "BreadGLX Demonstration")?;
     win.map(conn.display_mut())?;
+
+    // now that we have a window, establish a GlContext
+    const CONTEXT_RULES: &[GlContextRule] = &[
+        GlContextRule::MajorVersion(3),
+        GlContextRule::MinorVersion(0),
+    ];
+
+    let context = match screen.create_context(&fbconfig, CONTEXT_RULES, None) {
+        Ok(context) => context,
+        Err(e) => {
+            // if we failed to initialize the GlContext, fall back to an older version of OpenGL
+            const FALLBACK_CONTEXT_RULES: &[GlContextRule] = &[
+                GlContextRule::MajorVersion(1),
+                GlContextRule::MinorVersion(0),
+            ];
+
+            screen.create_context(&fbconfig, FALLBACK_CONTEXT_RULES, None)?
+        }
+    };
+
+    context.bind(&mut conn, win)?;
+
     Ok(())
 }

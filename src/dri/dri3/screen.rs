@@ -1,44 +1,65 @@
 // MIT/Apache2 License
 
-use super::super::ExtensionContainer;
+use super::{super::ExtensionContainer, Dri3Drawable};
 use crate::{
+    config::{GlConfig, GLX_FBCONFIG_ID},
+    context::{dispatch::ContextDispatch, GlContext, GlContextRule, InnerGlContext},
     cstr::{const_cstr, ConstCstr},
+    display::GlDisplay,
     dll::Dll,
-    dri::{ffi, load},
+    dri::{config, ffi, load},
+    screen::GlInternalScreen,
 };
-use breadx::{Connection, Display};
+use ahash::AHasher;
+use breadx::{Connection, Display, Drawable};
+use dashmap::DashMap;
 use std::{
     cell::UnsafeCell,
+    collections::HashMap,
     ffi::{c_void, CStr},
+    hash::{Hash, Hasher},
     os::raw::c_int,
     ptr::{self, NonNull},
     sync::Arc,
 };
 
+#[cfg(feature = "async")]
+use crate::util::GenericFuture;
+
 #[repr(transparent)]
 #[derive(Debug, Clone)]
 pub struct Dri3Screen {
-    inner: Arc<Dri3ScreenInner>,
+    pub(crate) inner: Arc<Dri3ScreenInner>,
 }
 
 #[derive(Debug)]
-struct Dri3ScreenInner {
+pub struct Dri3ScreenInner {
     // the library loaded for the DRI layer
     driver: Dll,
     // the fd the screen is running on
     fd: c_int,
     // if this is running on a different GPU
-    is_different_gpu: bool,
+    pub is_different_gpu: bool,
 
     // the internal pointer to the actual DRI screen
     dri_screen: Option<NonNull<ffi::__DRIscreen>>,
 
+    // a map matching the hash values of glconfigs to driconfig pointers
+    dri_configmap: Option<HashMap<u64, NonNull<ffi::__DRIconfig>>>,
+
+    // a map matching X11 drawables to DRI3 drawables
+    drawable_map: DashMap<Drawable, Arc<Dri3Drawable>>,
+
+    // store the fbconfigs and visualinfos in here as well
+    fbconfigs: Arc<[GlConfig]>,
+    visuals: Arc<[GlConfig]>,
+
     // pointers to the extensions
     image: *const ffi::__DRIimageExtension,
-    image_driver: *const ffi::__DRIimageDriverExtension,
-    core: *const ffi::__DRIcoreExtension,
-    flush: *const ffi::__DRI2flushExtension,
-    config: *const ffi::__DRI2configQueryExtension,
+    pub(crate) image_driver: *const ffi::__DRIimageDriverExtension,
+    pub(crate) core: *const ffi::__DRIcoreExtension,
+    pub(crate) flush: *const ffi::__DRI2flushExtension,
+    pub(crate) config: *const ffi::__DRI2configQueryExtension,
     tex_buffer: *const ffi::__DRItexBufferExtension,
     renderer_query: *const ffi::__DRI2rendererQueryExtension,
     interop: *const ffi::__DRI2interopExtension,
@@ -117,6 +138,7 @@ impl Dri3ScreenInner {
                 // casts this value to an immutable reference. therefore, for all intents and purposes, this is
                 // an immutable reference. in order to hold the variant that this memory is shared, we use an
                 // Arc instead of a Box later on
+                // (We also use the arc to simplify some async logic, but don't tell anyone that)
                 self as *mut Dri3ScreenInner as *mut c_void,
             )
         };
@@ -164,23 +186,39 @@ impl Dri3Screen {
     pub(crate) fn new<Conn: Connection>(
         dpy: &mut Display<Conn>,
         scr: usize,
+        visuals: Arc<[GlConfig]>,
+        fbconfigs: Arc<[GlConfig]>,
     ) -> breadx::Result<Self> {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "async")] {
-                async_io::block_on(Self::new_async(dpy, scr))
-            } else {
-                Self::new_blocking(dpy, scr)
-            }
-        }
+        Self::new_blocking(dpy, scr, visuals, fbconfigs)
     }
 
     #[inline]
-    fn dri_screen(&self) -> NonNull<ffi::__DRIscreen> {
+    pub fn dri_screen(&self) -> NonNull<ffi::__DRIscreen> {
         self.inner.dri_screen.expect("Failed to load DRI screen")
     }
 
     #[inline]
-    fn new_blocking<Conn: Connection>(dpy: &mut Display<Conn>, scr: usize) -> breadx::Result<Self> {
+    pub(crate) fn driconfig_from_fbconfig(
+        &self,
+        cfg: &GlConfig,
+    ) -> Option<NonNull<ffi::__DRIconfig>> {
+        let mut hasher = AHasher::default();
+        cfg.hash(&mut hasher);
+        self.inner
+            .dri_configmap
+            .as_ref()
+            .unwrap()
+            .get(&hasher.finish())
+            .cloned()
+    }
+
+    #[inline]
+    fn new_blocking<Conn: Connection>(
+        dpy: &mut Display<Conn>,
+        scr: usize,
+        visuals: Arc<[GlConfig]>,
+        fbconfigs: Arc<[GlConfig]>,
+    ) -> breadx::Result<Self> {
         // first, figure out which file descriptor corresponds to our screen
         let root = dpy.screens()[scr].root;
         let fd = dpy.open_dri3_immediate(root, 0)?;
@@ -211,19 +249,37 @@ impl Dri3Screen {
             renderer_query: ptr::null(),
             interop: ptr::null(),
             driver_configs: ptr::null_mut(),
+            dri_configmap: None,
+            drawable_map: DashMap::new(),
+            fbconfigs: fbconfigs.clone(),
+            visuals: visuals.clone(),
         });
 
         // use the image driver to actually create the screen
-        Arc::get_mut(&mut this)
-            .expect("Infallible Arc::get_mut()")
-            .create_dri_screen(scr, fd, unsafe {
-                &mut *(extensions.as_mut_slice() as *mut [ExtensionContainer])
-            })?;
+        let thisref = Arc::get_mut(&mut this).expect("Infallible Arc::get_mut()");
+        thisref.create_dri_screen(scr, fd, unsafe {
+            &mut *(extensions.as_mut_slice() as *mut [ExtensionContainer])
+        })?;
 
-        // now we can load up the extension
-        Arc::get_mut(&mut this)
-            .expect("Infallible Arc::get_mut()")
-            .get_extensions()?;
+        // now we can load up the extension and additional configs
+        thisref.get_extensions()?;
+        let mut extmap: HashMap<u64, NonNull<ffi::__DRIconfig>> = unsafe {
+            config::convert_configs(
+                ExtensionContainer(thisref.core as *const _),
+                &visuals,
+                thisref.driver_configs,
+            )
+        }
+        .collect();
+        extmap.extend(unsafe {
+            config::convert_configs(
+                ExtensionContainer(thisref.core as *const _),
+                &fbconfigs,
+                thisref.driver_configs,
+            )
+        });
+
+        thisref.dri_configmap = Some(extmap);
 
         Ok(Dri3Screen { inner: this.into() })
     }
@@ -233,6 +289,8 @@ impl Dri3Screen {
     pub async fn new_async<Conn: Connection>(
         dpy: &mut Display<Conn>,
         scr: usize,
+        visuals: Arc<[GlConfig]>,
+        fbconfigs: Arc<[GlConfig]>,
     ) -> breadx::Result<Self> {
         // first, figure out which file descriptor corresponds to our screen
         let root = dpy.screens()[scr].root;
@@ -264,25 +322,153 @@ impl Dri3Screen {
             renderer_query: ptr::null(),
             interop: ptr::null(),
             driver_configs: ptr::null_mut(),
+            dri_configmap: None,
+            drawable_map: DashMap::new(),
+            fbconfigs: fbconfigs.clone(),
+            visuals: visuals.clone(),
         });
 
         // use the image driver to actually create the screen
         let this = blocking::unblock(move || -> breadx::Result<Arc<Dri3ScreenInner>> {
             let exts = unsafe { &mut *(extensions.as_mut_slice() as *mut [ExtensionContainer]) };
 
-            Arc::get_mut(&mut this)
-                .expect("Infallible Arc::get_mut()")
-                .create_dri_screen(scr, fd, exts)?;
+            let thisref = Arc::get_mut(&mut this).expect("Infallible Arc::get_mut()");
+            thisref.create_dri_screen(scr, fd, exts)?;
 
             // now we can load up the extension
-            Arc::get_mut(&mut this)
-                .expect("Infallible Arc::get_mut()")
-                .get_extensions()?;
+            thisref.get_extensions()?;
+
+            let mut extmap: HashMap<u64, NonNull<ffi::__DRIconfig>> = unsafe {
+                config::convert_configs(
+                    ExtensionContainer(thisref.core as *const _),
+                    &visuals,
+                    thisref.driver_configs,
+                )
+            }
+            .collect();
+            extmap.extend(unsafe {
+                config::convert_configs(
+                    ExtensionContainer(thisref.core as *const _),
+                    &fbconfigs,
+                    thisref.driver_configs,
+                )
+            });
+
+            thisref.dri_configmap = Some(extmap);
+
             Ok(this)
         })
         .await?;
 
         Ok(Dri3Screen { inner: this })
+    }
+
+    /// Get the DRI drawable associated with an X11 drawable.
+    #[inline]
+    pub(crate) fn fetch_dri_drawable<
+        Conn: Connection,
+        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>,
+    >(
+        &self,
+        dpy: &mut GlDisplay<Conn, Dpy>,
+        drawable: Drawable,
+    ) -> breadx::Result<Arc<Dri3Drawable>> {
+        match self.inner.drawable_map.get(&drawable) {
+            Some(d) => Ok(d.clone()),
+            None => {
+                let fbconfig = dpy
+                    .load_drawable_property(drawable, GLX_FBCONFIG_ID)?
+                    .and_then(|fbid| {
+                        self.inner
+                            .fbconfigs
+                            .iter()
+                            .find(|f| f.fbconfig_id == fbid as c_int)
+                    })
+                    .ok_or(breadx::BreadError::StaticMsg("Failed to find FbConfig ID"))?;
+                let d = Arc::new(Dri3Drawable::new(
+                    dpy.display_mut(),
+                    drawable,
+                    self.clone(),
+                    fbconfig.clone(),
+                )?);
+                self.inner.drawable_map.insert(drawable, d.clone());
+                Ok(d)
+            }
+        }
+    }
+
+    /// Get the DRI drawable associated with an X11 drawable, async redox.
+    #[cfg(feature = "async")]
+    #[inline]
+    pub(crate) async fn fetch_dri_drawable_async<
+        Conn: Connection,
+        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>,
+    >(
+        &self,
+        dpy: &mut GlDisplay<Conn, Dpy>,
+        drawable: Drawable,
+    ) -> breadx::Result<Arc<Dri3Drawable>> {
+        match self.inner.drawable_map.get(&drawable) {
+            Some(d) => Ok(d.clone()),
+            None => {
+                let fbconfig = dpy
+                    .load_drawable_property_async(drawable, GLX_FBCONFIG_ID)
+                    .await?
+                    .and_then(|fbid| {
+                        self.inner
+                            .fbconfigs
+                            .iter()
+                            .find(|f| f.fbconfig_id == fbid as c_int)
+                    })
+                    .ok_or(breadx::BreadError::StaticMsg("Failed to find FbConfig ID"))?;
+                let d = Arc::new(
+                    Dri3Drawable::new_async(
+                        dpy.display_mut(),
+                        drawable,
+                        self.clone(),
+                        fbconfig.clone(),
+                    )
+                    .await?,
+                );
+                self.inner.drawable_map.insert(drawable, d.clone());
+                Ok(d)
+            }
+        }
+    }
+}
+
+impl GlInternalScreen for Dri3Screen {
+    #[inline]
+    fn create_context(
+        &self,
+        base: &mut Arc<InnerGlContext>,
+        fbconfig: &GlConfig,
+        rules: &[GlContextRule],
+        share: Option<&GlContext>,
+    ) -> breadx::Result<ContextDispatch> {
+        let cfg = super::Dri3Context::new(self, fbconfig, rules, share, base)?;
+        Ok(cfg.into())
+    }
+
+    #[cfg(feature = "async")]
+    fn create_context_async<'future, 'a, 'b, 'c, 'd, 'e>(
+        &'a self,
+        base: &'b mut Arc<InnerGlContext>,
+        fbconfig: &'c GlConfig,
+        rules: &'d [GlContextRule],
+        share: Option<&'e GlContext>,
+    ) -> GenericFuture<'future, breadx::Result<ContextDispatch>>
+    where
+        'a: 'future,
+        'b: 'future,
+        'c: 'future,
+        'd: 'future,
+        'e: 'future,
+    {
+        Box::pin(async move {
+            let cfg = super::Dri3Context::new_async(self, fbconfig, rules, share, base).await?;
+            Ok(cfg.into())
+        })
     }
 }
 
