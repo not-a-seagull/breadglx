@@ -88,7 +88,7 @@ impl GlInternalDisplay for Dri3Display {
         dpy: &mut Display<Conn>,
         index: usize,
     ) -> breadx::Result<GlScreen> {
-        let (visuals, fbconfigs) = screen::get_visuals_and_fbconfigs(dpy, index)?;
+        let (visuals, fbconfigs) = GlConfig::get_visuals_and_fbconfigs(dpy, index)?;
         let visuals: Arc<[GlConfig]> = visuals.into_boxed_slice().into();
         let fbconfigs: Arc<[GlConfig]> = fbconfigs.into_boxed_slice().into();
         let screen = Dri3Screen::new(dpy, index, visuals.clone(), fbconfigs.clone())?;
@@ -109,7 +109,8 @@ impl GlInternalDisplay for Dri3Display {
     {
         Box::pin(async move {
             // TODO: find a way to zip these futures together
-            let (visuals, fbconfigs) = screen::get_visuals_and_fbconfigs_async(dpy, index).await?;
+            let (visuals, fbconfigs) =
+                GlConfig::get_visuals_and_fbconfigs_async(dpy, index).await?;
             let visuals: Arc<[GlConfig]> = visuals.into_boxed_slice().into();
             let fbconfigs: Arc<[GlConfig]> = fbconfigs.into_boxed_slice().into();
             let dri3_screen =

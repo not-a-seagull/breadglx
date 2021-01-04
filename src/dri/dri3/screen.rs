@@ -394,7 +394,7 @@ impl Dri3Screen {
                 let fbconfig = match context.fbconfig() {
                     Some(fbc) => fbc,
                     None => dpy
-                        .load_drawable_property(drawable, GLX_FBCONFIG_ID)?
+                        .load_drawable_property(drawable, GLX_FBCONFIG_ID as _)?
                         .and_then(|fbid| {
                             self.inner
                                 .fbconfigs
@@ -433,7 +433,7 @@ impl Dri3Screen {
                 let fbconfig = match context.fbconfig() {
                     Some(fbconfig) => fbconfig,
                     None => dpy
-                        .load_drawable_property_async(drawable, GLX_FBCONFIG_ID)
+                        .load_drawable_property_async(drawable, GLX_FBCONFIG_ID as _)
                         .await?
                         .and_then(|fbid| {
                             self.inner

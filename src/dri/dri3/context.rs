@@ -236,7 +236,7 @@ impl GlInternalContext for Dri3Context {
                 ((*this.screen().inner.core)
                     .bindContext
                     .expect("bindContext not present"))(
-                    this.dri_context.as_ptr(),
+                    this.dri_context().as_ptr(),
                     match draw2 {
                         Some(draw) => draw.dri_drawable().as_ptr(),
                         None => ptr::null_mut(),

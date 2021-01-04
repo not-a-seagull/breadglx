@@ -3,6 +3,7 @@
 use crate::{
     config::{GlConfig, GlConfigRule},
     context::{dispatch::ContextDispatch, GlContext, GlContextRule, InnerGlContext},
+    display::GlDisplay,
     dri::{dri2, dri3},
     indirect,
 };
@@ -16,10 +17,7 @@ use std::sync::Arc;
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
 
-mod config;
 mod dispatch;
-
-pub(crate) use config::*;
 
 /// The screen used by the GL system.
 #[derive(Debug)]
@@ -131,8 +129,9 @@ impl GlScreen {
 
     /// Create an OpenGL context.
     #[inline]
-    pub fn create_context(
+    pub fn create_context<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>>(
         &self,
+        dpy: &mut GlDisplay<Conn, Dpy>,
         fbconfig: &GlConfig,
         rules: &[GlContextRule],
         share: Option<&GlContext>,
@@ -145,15 +144,27 @@ impl GlScreen {
             .create_context(&mut ctx.inner, fbconfig, rules, share)?;
         // set the dispatch
         ctx.set_dispatch(disp);
-        // return
+        // create the attribs
+        let attribs = GlContextRule::convert_ctx_attrib_to_classic(rules)
+            .into_iter()
+            .map(|c| c as u32)
+            .collect();
+        // get xid from server
+        let xid = dpy
+            .display_mut()
+            .create_context_attribs_arb(fbconfig.fbconfig_id, self.screen)?;
         Ok(ctx)
     }
 
     /// Create an OpenGL context, async redox.
     #[cfg(feature = "async")]
     #[inline]
-    pub async fn create_context_async(
+    pub async fn create_context_async<
+        Conn: Connection,
+        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>,
+    >(
         &self,
+        dpy: &mut GlDisplay<Conn, Dpy>,
         fbconfig: &GlConfig,
         rules: &[GlContextRule],
         share: Option<&GlContext>,

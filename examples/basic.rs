@@ -8,7 +8,7 @@ use breadx::{
 use std::env;
 
 fn main() -> Result<()> {
-    env::set_var("RUST_LOG", "breadx=warn,breadglx=debug");
+    env::set_var("RUST_LOG", "breadx=warn,breadglx=info");
     env_logger::init();
 
     // establish a connection, wrap it in a GlDisplay, and use that to produce a GlScreen
@@ -81,7 +81,7 @@ fn main() -> Result<()> {
         GlContextRule::MinorVersion(0),
     ];
 
-    let context = match screen.create_context(&fbconfig, CONTEXT_RULES, None) {
+    let context = match screen.create_context(&mut conn, &fbconfig, CONTEXT_RULES, None) {
         Ok(context) => context,
         Err(e) => {
             // if we failed to initialize the GlContext, fall back to an older version of OpenGL
@@ -90,7 +90,7 @@ fn main() -> Result<()> {
                 GlContextRule::MinorVersion(0),
             ];
 
-            screen.create_context(&fbconfig, FALLBACK_CONTEXT_RULES, None)?
+            screen.create_context(&mut conn, &fbconfig, FALLBACK_CONTEXT_RULES, None)?
         }
     };
 

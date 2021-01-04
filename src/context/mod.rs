@@ -11,6 +11,8 @@ use std::{mem, sync::Arc};
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
 
+mod attrib;
+pub use attrib::*;
 pub(crate) mod dispatch;
 pub(crate) use dispatch::ContextDispatch;
 
@@ -126,7 +128,7 @@ impl GlContext {
     #[inline]
     async fn bind_internal_async<
         Conn: Connection,
-        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>,
+        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>> + Send,
     >(
         &self,
         dpy: &mut GlDisplay<Conn, Dpy>,
@@ -172,7 +174,7 @@ impl GlContext {
     #[inline]
     pub async fn bind_async<
         Conn: Connection,
-        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>,
+        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>> + Send,
         Target: Into<Drawable>,
     >(
         &self,
@@ -182,41 +184,6 @@ impl GlContext {
         let draw = draw.into();
         self.bind_internal_async(dpy, Some(draw), Some(draw)).await
     }
-}
-
-/// Rules for the context.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum GlContextRule {
-    MajorVersion(i32),
-    MinorVersion(i32),
-    Flags(u32),
-    NoError(bool),
-    Profile(Profile),
-    RenderType(u32),
-    ResetNotificationStrategy(ResetNotificationStrategy),
-    ReleaseBehavior(ReleaseBehavior),
-}
-
-/// Profile for the context.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum Profile {
-    Core,
-    Compatibility,
-    Es,
-}
-
-/// Reset notification strategy for the context.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum ResetNotificationStrategy {
-    NoNotification,
-    LoseContext,
-}
-
-/// Release behavior for the context.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum ReleaseBehavior {
-    None,
-    Flush,
 }
 
 /// A static memory location containing the currently active GlContext.

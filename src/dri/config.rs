@@ -3,10 +3,9 @@
 use super::ffi;
 use crate::{
     config::{
-        GlConfig, CFG_NONE, COLOR_INDEX_BIT, DONT_CARE, NON_CONFORMANT_CONFIG, RGBA_BIT,
-        RGBA_FLOAT_BIT_ARB, RGBA_UNSIGNED_FLOAT_BIT_EXT, SLOW_CONFIG, SWAP_COPY_OML,
-        SWAP_EXCHANGE_OML, SWAP_UNDEFINED_OML, TEXTURE_1D_BIT_EXT, TEXTURE_2D_BIT_EXT,
-        TEXTURE_RECTANGLE_BIT_EXT,
+        GlConfig, GlSwapMethod, COLOR_INDEX_BIT, CONFIG_NONE, DONT_CARE, NON_CONFORMANT_CONFIG,
+        RGBA_BIT, RGBA_FLOAT_BIT_ARB, RGBA_UNSIGNED_FLOAT_BIT_EXT, SLOW_CONFIG, TEXTURE_1D_BIT_EXT,
+        TEXTURE_2D_BIT_EXT, TEXTURE_RECTANGLE_BIT_EXT,
     },
     dri::ExtensionContainer,
 };
@@ -130,7 +129,7 @@ fn config_seg_equal(config: &GlConfig, attrib: c_uint, value: c_uint) -> bool {
         } else if value & ffi::__DRI_ATTRIB_SLOW_BIT != 0 {
             SLOW_CONFIG
         } else {
-            CFG_NONE
+            CONFIG_NONE
         };
 
         let res = config.visual_rating == equivalent;
@@ -167,14 +166,14 @@ fn config_seg_equal(config: &GlConfig, attrib: c_uint, value: c_uint) -> bool {
         res
     } else if attrib == ffi::__DRI_ATTRIB_SWAP_METHOD {
         let equivalent = if value == ffi::__DRI_ATTRIB_SWAP_EXCHANGE {
-            SWAP_EXCHANGE_OML as c_uint
+            GlSwapMethod::Exchange
         } else if value == ffi::__DRI_ATTRIB_SWAP_COPY {
-            SWAP_COPY_OML as c_uint
+            GlSwapMethod::Copy
         } else {
-            SWAP_UNDEFINED_OML as c_uint
+            GlSwapMethod::Undefined
         };
 
-        raw_compare(config, attrib, equivalent)
+        config.swap_method == GlSwapMethod::DontCare || config.swap_method == equivalent
     } else {
         raw_compare(config, attrib, value)
     }
@@ -194,7 +193,11 @@ fn raw_compare(config: &GlConfig, attrib: c_uint, value: c_uint) -> bool {
         })
         .unwrap_or(true);
     if !res {
-        log::debug!("Config of ID 0x{:X} failed on 0x{:X}", config.fbconfig_id, attrib);
+        log::debug!(
+            "Config of ID 0x{:X} failed on 0x{:X}",
+            config.fbconfig_id,
+            attrib
+        );
     } else if res && attrib == 1 {
         println!("Config succeeded on 1");
     }
