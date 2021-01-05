@@ -137,6 +137,11 @@ impl Dri3Context {
 
 impl GlInternalContext for Dri3Context {
     #[inline]
+    fn is_direct(&self) -> bool {
+        true
+    }
+
+    #[inline]
     fn bind<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>>(
         &self,
         dpy: &mut GlDisplay<Conn, Dpy>,
@@ -236,7 +241,7 @@ impl GlInternalContext for Dri3Context {
                 ((*this.screen().inner.core)
                     .bindContext
                     .expect("bindContext not present"))(
-                    this.dri_context.as_ptr(),
+                    this.dri_context().as_ptr(),
                     match draw2 {
                         Some(draw) => draw.dri_drawable().as_ptr(),
                         None => ptr::null_mut(),

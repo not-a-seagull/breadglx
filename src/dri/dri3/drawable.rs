@@ -12,6 +12,7 @@ use breadx::{
     Drawable, PropMode, PropertyFormat, PropertyType, Window,
 };
 use std::{
+    ffi::c_void,
     os::raw::{c_int, c_uchar},
     ptr::{self, NonNull},
     sync::Arc,
@@ -51,7 +52,7 @@ impl Dri3Drawable {
         drawable: Drawable,
         screen: Dri3Screen,
         config: GlConfig,
-    ) -> breadx::Result<Self> {
+    ) -> breadx::Result<Arc<Self>> {
         let (adaptive_sync, vblank_mode) = get_adaptive_sync_and_vblank_mode(&screen);
         let swap_interval = match vblank_mode {
             0 | 1 => 0,
@@ -62,21 +63,27 @@ impl Dri3Drawable {
             set_adaptive_sync(dpy, drawable, false)?;
         }
 
-        // create the drawable pointer
-        let dri_drawable = create_the_drawable(&screen, &config, drawable)?;
-
         // get the width and height of the drawable
         let geometry = breadx::drawable::get_geometry_immediate(dpy, drawable)?;
 
-        Ok(Self {
-            drawable: dri_drawable.0,
+        let mut this = Arc::new(Self {
+            drawable: NonNull::dangling(),
             config,
             is_different_gpu: screen.inner.is_different_gpu,
             screen,
             width: geometry.width,
             height: geometry.height,
             swap_interval,
-        })
+        });
+
+        // create the drawable pointer
+        let dri_drawable =
+            create_the_drawable(&this.screen, &this.config, Arc::as_ptr(&this) as _)?;
+        Arc::get_mut(&mut this)
+            .expect("Infallible Arc::get_mut()")
+            .drawable = dri_drawable.0;
+
+        Ok(this)
     }
 
     #[cfg(feature = "async")]
@@ -86,7 +93,7 @@ impl Dri3Drawable {
         drawable: Drawable,
         screen: Dri3Screen,
         config: GlConfig,
-    ) -> breadx::Result<Self> {
+    ) -> breadx::Result<Arc<Self>> {
         let (adaptive_sync, vblank_mode, screen) = blocking::unblock(move || {
             let (adaptive_sync, vblank_mode) = get_adaptive_sync_and_vblank_mode(&screen);
             (adaptive_sync, vblank_mode, screen)
@@ -97,6 +104,8 @@ impl Dri3Drawable {
             _ => 1,
         };
 
+        let geometry = breadx::drawable::get_geometry_immediate_async(dpy, drawable).await?;
+
         // TODO: figure out if this is more expensive than it's worth
         let as_future = if adaptive_sync == 0 {
             Box::pin(set_adaptive_sync_async(dpy, drawable, false))
@@ -105,27 +114,35 @@ impl Dri3Drawable {
             Box::pin(async { Ok(()) }) as GenericFuture<'_, breadx::Result>
         };
 
-        let (res, (dri_drawable, screen, config)) = future::zip(as_future, async move {
-            blocking::unblock(move || {
-                let dri_drawable = create_the_drawable(&screen, &config, drawable);
-                (dri_drawable, screen, config)
-            })
-            .await
-        })
-        .await;
-
-        let dri_drawable = res.and(dri_drawable)?;
-        let geometry = breadx::drawable::get_geometry_immediate_async(dpy, drawable).await?;
-
-        Ok(Self {
-            drawable: dri_drawable.0,
+        let mut this = Arc::new(Self {
+            drawable: NonNull::dangling(),
             config,
             is_different_gpu: screen.inner.is_different_gpu,
             screen,
             width: geometry.width,
             height: geometry.height,
             swap_interval,
+        });
+
+        let this1 = this.clone();
+        let (res, dri_drawable) = future::zip(as_future, async move {
+            blocking::unblock(move || {
+                let dri_drawable = create_the_drawable(
+                    &this1.screen,
+                    &this1.config,
+                    Arc::as_ptr(&this1) as *const _,
+                );
+                dri_drawable
+            })
+            .await
         })
+        .await;
+
+        let dri_drawable = res.and(dri_drawable)?;
+        Arc::get_mut(&mut this)
+            .expect("Infallible Arc::get_mut()")
+            .drawable = dri_drawable.0;
+        Ok(this)
     }
 
     #[inline]
@@ -183,7 +200,7 @@ fn get_adaptive_sync_and_vblank_mode(screen: &Dri3Screen) -> (c_uchar, c_int) {
 fn create_the_drawable(
     screen: &Dri3Screen,
     config: &GlConfig,
-    drawable: Drawable,
+    drawable: *const c_void,
 ) -> breadx::Result<DriDrawablePtr> {
     let config = match screen.driconfig_from_fbconfig(&config) {
         Some(config) => config.as_ptr(),
@@ -199,7 +216,7 @@ fn create_the_drawable(
             .expect("createNewDrawable not present"))(
             screen.dri_screen().as_ptr(),
             config,
-            ptr::null_mut(),
+            drawable as *mut _,
         )
     };
     let dri_drawable = NonNull::new(dri_drawable).ok_or(breadx::BreadError::StaticMsg(

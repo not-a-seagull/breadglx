@@ -2,7 +2,7 @@
 
 use super::{config::GlConfig, display::GlDisplay};
 use breadx::{
-    auto::glx,
+    auto::glx::{self, Context},
     display::{Connection, Display},
     Drawable,
 };
@@ -11,6 +11,8 @@ use std::{mem, sync::Arc};
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
 
+mod attrib;
+pub use attrib::*;
 pub(crate) mod dispatch;
 pub(crate) use dispatch::ContextDispatch;
 
@@ -28,7 +30,7 @@ pub struct GlContext {
 
 pub(crate) struct InnerGlContext {
     // xid relating to the current contex
-    xid: glx::Context,
+    pub(crate) xid: glx::Context,
     // the screen associated with this context
     screen: usize,
     // framebuffer config associated with this context
@@ -38,6 +40,8 @@ pub(crate) struct InnerGlContext {
 }
 
 pub(crate) trait GlInternalContext {
+    fn is_direct(&self) -> bool;
+
     /// Bind this context to the given drawable.
     fn bind<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>>(
         &self,
@@ -95,6 +99,11 @@ impl GlContext {
     }
 
     #[inline]
+    pub fn xid(&self) -> Context {
+        self.inner.xid
+    }
+
+    #[inline]
     fn bind_internal<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>>(
         &self,
         dpy: &mut GlDisplay<Conn, Dpy>,
@@ -126,7 +135,7 @@ impl GlContext {
     #[inline]
     async fn bind_internal_async<
         Conn: Connection,
-        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>,
+        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>> + Send,
     >(
         &self,
         dpy: &mut GlDisplay<Conn, Dpy>,
@@ -172,7 +181,7 @@ impl GlContext {
     #[inline]
     pub async fn bind_async<
         Conn: Connection,
-        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>,
+        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>> + Send,
         Target: Into<Drawable>,
     >(
         &self,
@@ -182,41 +191,6 @@ impl GlContext {
         let draw = draw.into();
         self.bind_internal_async(dpy, Some(draw), Some(draw)).await
     }
-}
-
-/// Rules for the context.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum GlContextRule {
-    MajorVersion(i32),
-    MinorVersion(i32),
-    Flags(u32),
-    NoError(bool),
-    Profile(Profile),
-    RenderType(u32),
-    ResetNotificationStrategy(ResetNotificationStrategy),
-    ReleaseBehavior(ReleaseBehavior),
-}
-
-/// Profile for the context.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum Profile {
-    Core,
-    Compatibility,
-    Es,
-}
-
-/// Reset notification strategy for the context.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum ResetNotificationStrategy {
-    NoNotification,
-    LoseContext,
-}
-
-/// Release behavior for the context.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum ReleaseBehavior {
-    None,
-    Flush,
 }
 
 /// A static memory location containing the currently active GlContext.

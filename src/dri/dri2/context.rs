@@ -13,6 +13,11 @@ pub struct Dri2Context {}
 
 impl GlInternalContext for Dri2Context {
     #[inline]
+    fn is_direct(&self) -> bool {
+        true
+    }
+
+    #[inline]
     fn bind<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>>(
         &self,
         dpy: &mut GlDisplay<Conn, Dpy>,

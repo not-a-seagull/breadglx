@@ -48,6 +48,18 @@ impl From<dri3::Dri3Context> for ContextDispatch {
 
 impl GlInternalContext for ContextDispatch {
     #[inline]
+    fn is_direct(&self) -> bool {
+        match self {
+            Self::Placeholder => unreachable!("Invalid placeholder"),
+            Self::Indirect(_) => false,
+            #[cfg(feature = "dri")]
+            Self::Dri2(d2) => true,
+            #[cfg(feature = "dri3")]
+            Self::Dri3(d3) => true,
+        }
+    }
+
+    #[inline]
     fn bind<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>>(
         &self,
         dpy: &mut GlDisplay<Conn, Dpy>,

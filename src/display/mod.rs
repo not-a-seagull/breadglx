@@ -17,6 +17,8 @@ pub struct GlDisplay<Conn, Dpy> {
     // the display that this acts as a wrapper around
     display: Dpy,
 
+    // major and minor versions of GLX
+
     // if the rendering should be direct or hardware accelerated
     direct: bool,
     accel: bool,
@@ -137,10 +139,6 @@ impl<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>> GlDispl
                     .display_mut()
                     .get_drawable_properties_immediate(drawable.into())?;
                 let propmap: HashMap<u32, u32> = repl.chunks(2).map(|kv| (kv[0], kv[1])).collect();
-                println!("Propmap for {:?}: ", drawable);
-                propmap
-                    .iter()
-                    .for_each(|(p, x)| println!("- {:X}: {:X}", p, x));
                 self.drawable_properties.insert(drawable, propmap);
                 self.drawable_properties
                     .get(&drawable)

@@ -3,11 +3,11 @@
 use crate::dri::{ffi, ExtensionContainer};
 use std::{
     os::raw::{c_int, c_uint, c_void},
-    ptr,
+    ptr::{self, raw_mut},
 };
 
-fn unimpl() -> ! {
-    log::error!("fill in later");
+fn unimpl(name: &'static str) -> ! {
+    log::error!("fill in later: {}", name);
     std::process::abort();
 }
 
@@ -20,21 +20,22 @@ unsafe extern "C" fn get_buffers(
     buffer_mask: u32,
     buffers: *mut ffi::__DRIimageList,
 ) -> c_int {
-    unimpl()
+    // write some of our initial values to the buffers variable
+    unimpl("get_buffers")
 }
 
 unsafe extern "C" fn flush_front_buffer(
     dri_drawable: *mut ffi::__DRIdrawable,
     loader: *mut c_void,
 ) {
-    unimpl()
+    unimpl("flush_front_buffer")
 }
 
 unsafe extern "C" fn flush_swap_buffers(
     dri_drawable: *mut ffi::__DRIdrawable,
     loader: *mut c_void,
 ) {
-    unimpl()
+    unimpl("flush_swap_buffers")
 }
 
 // Loader extensions
@@ -60,7 +61,7 @@ const INVALIDATE_EXTENSION: ffi::__DRIuseInvalidateExtension = ffi::__DRIuseInva
 
 /* Implementation of Background Callable extension functions */
 unsafe extern "C" fn set_background_context(loader: *mut c_void) {
-    unimpl()
+    unimpl("set_background_context")
 }
 
 unsafe extern "C" fn is_thread_safe(_loader: *mut c_void) -> ffi::GLboolean {

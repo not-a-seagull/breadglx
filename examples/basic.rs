@@ -1,6 +1,6 @@
 // MIT/Apache2 License
 
-use breadglx::{GlConfigRule, GlContextRule, GlDisplay};
+use breadglx::{GlConfigRule, GlContextRule, GlDisplay, GlVisualType};
 use breadx::{
     ColormapAlloc, DisplayConnection, EventMask, Pixmap, Result, VisualClass, WindowClass,
     WindowParameters,
@@ -8,7 +8,7 @@ use breadx::{
 use std::env;
 
 fn main() -> Result<()> {
-    env::set_var("RUST_LOG", "breadx=warn,breadglx=debug");
+    env::set_var("RUST_LOG", "breadx=warn,breadglx=info");
     env_logger::init();
 
     // establish a connection, wrap it in a GlDisplay, and use that to produce a GlScreen
@@ -17,11 +17,14 @@ fn main() -> Result<()> {
     let root = conn.display().default_screen().root;
     let mut screen = conn.create_screen(conn.display().default_screen_index())?;
 
+    let extinfo = conn.display_mut().query_extension_immediate("GLX".to_string())?;
+    println!("GLX: {:?}", &extinfo);
+
     // find the ideal framebuffer config for our use
     const FBCONFIG_RULES: &[GlConfigRule] = &[
         GlConfigRule::DrawableType(breadglx::WINDOW_BIT),
         GlConfigRule::RenderType(breadglx::RGBA_BIT),
-        GlConfigRule::VisualType(VisualClass::TrueColor),
+        GlConfigRule::VisualType(GlVisualType::TrueColor),
         GlConfigRule::RedBits(8),
         GlConfigRule::GreenBits(8),
         GlConfigRule::BlueBits(8),
@@ -29,7 +32,7 @@ fn main() -> Result<()> {
         GlConfigRule::DepthBits(24),
         GlConfigRule::StencilBits(8),
         GlConfigRule::DoubleBufferMode(1),
-        //        GlConfigRule::XRenderable(1),
+//        GlConfigRule::XRenderable(1),
     ];
 
     let fbconfig = screen
@@ -81,7 +84,7 @@ fn main() -> Result<()> {
         GlContextRule::MinorVersion(0),
     ];
 
-    let context = match screen.create_context(&fbconfig, CONTEXT_RULES, None) {
+    let context = match screen.create_context(&mut conn, &fbconfig, CONTEXT_RULES, None) {
         Ok(context) => context,
         Err(e) => {
             // if we failed to initialize the GlContext, fall back to an older version of OpenGL
@@ -90,7 +93,7 @@ fn main() -> Result<()> {
                 GlContextRule::MinorVersion(0),
             ];
 
-            screen.create_context(&fbconfig, FALLBACK_CONTEXT_RULES, None)?
+            screen.create_context(&mut conn, &fbconfig, FALLBACK_CONTEXT_RULES, None)?
         }
     };
 
