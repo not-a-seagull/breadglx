@@ -2,17 +2,19 @@
 
 use crate::{
     config::{GlConfig, GlConfigRule},
-    context::{dispatch::ContextDispatch, GlContext, GlContextRule, InnerGlContext},
+    context::{
+        dispatch::ContextDispatch, GlContext, GlContextRule, GlInternalContext, InnerGlContext,
+    },
     display::GlDisplay,
     dri::{dri2, dri3},
     indirect,
 };
 use breadx::{
-    auto::glx::Context,
+    auto::glx::{self, Context},
     display::{Connection, Display},
     XidType,
 };
-use std::sync::Arc;
+use std::{convert::TryInto, sync::Arc};
 
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
@@ -150,9 +152,19 @@ impl GlScreen {
             .map(|c| c as u32)
             .collect();
         // get xid from server
-        let xid = dpy
-            .display_mut()
-            .create_context_attribs_arb(fbconfig.fbconfig_id, self.screen)?;
+        let xid = dpy.display_mut().create_context_attribs_arb(
+            glx::Fbconfig::const_from_xid(fbconfig.fbconfig_id as _),
+            self.screen,
+            match share {
+                Some(share) => share.xid(),
+                None => Context::default(),
+            },
+            ctx.dispatch().is_direct(),
+            attribs,
+        )?;
+        Arc::get_mut(&mut ctx.inner)
+            .expect("Infallible Arc::get_mut()")
+            .xid = xid;
         Ok(ctx)
     }
 
@@ -173,9 +185,34 @@ impl GlScreen {
         let mut ctx = GlContext::new(Context::from_xid(0), self.screen, fbconfig.clone());
         let disp = self
             .disp
-            .create_context_async(&mut ctx.inner, fbconfig, rules, share)
+            .create_context_async(
+                &mut ctx.inner,
+                fbconfig,
+                rules,
+                share,
+            )
             .await?;
         ctx.set_dispatch(disp);
+        let attribs = GlContextRule::convert_ctx_attrib_to_classic(rules)
+            .into_iter()
+            .map(|c| c as u32)
+            .collect();
+        let xid = dpy
+            .display_mut()
+            .create_context_attribs_arb_async(
+                glx::Fbconfig::const_from_xid(fbconfig.fbconfig_id as _),
+                self.screen,
+                match share {
+                    Some(share) => share.xid(),
+                    None => Context::default(),
+                },
+                ctx.dispatch().is_direct(),
+                attribs,
+            )
+            .await?;
+        Arc::get_mut(&mut ctx.inner)
+            .expect("Infallible Arc::get_mut()")
+            .xid = xid;
         Ok(ctx)
     }
 }

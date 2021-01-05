@@ -13,6 +13,11 @@ pub struct IndirectContext {}
 
 impl GlInternalContext for IndirectContext {
     #[inline]
+    fn is_direct(&self) -> bool {
+        false
+    }
+
+    #[inline]
     fn bind<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>>(
         &self,
         dpy: &mut GlDisplay<Conn, Dpy>,

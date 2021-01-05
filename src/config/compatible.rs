@@ -8,11 +8,12 @@ impl GlConfig {
     #[inline]
     fn compatible_with(&self, other: &GlConfig) -> bool {
         macro_rules! rmatch {
-            ($a: expr, $b: expr, $fname: ident) => {{
+            ($a: expr, $b: expr, $fname: ident) => {
                 if ($a).$fname != DONT_CARE as _ && ($a).$fname != ($b).$fname {
+                    log::trace!("Config failed on {}", stringify!($fname));
                     return false;
                 }
-            }};
+            };
 
             ($a: expr, $b: expr, $fname: ident, $($other: ident),*) => {{
                 rmatch!($a, $b, $fname);
@@ -22,45 +23,48 @@ impl GlConfig {
         }
 
         macro_rules! rmatch_lt {
-            ($a: expr, $b: expr, $fname: ident) => {{
+            ($a: expr, $b: expr, $fname: ident) => {
                 if ($a).$fname != DONT_CARE as _ && ($a).$fname > ($b).$fname {
+                    log::trace!("Config failed on {}", stringify!($fname));
                     return false;
                 }
-            }};
+            };
 
-            ($a: expr, $b: expr, $fname: ident, $($other: ident),*) => {{
+            ($a: expr, $b: expr, $fname: ident, $($other: ident),*) => {
                 rmatch_lt!($a, $b, $fname);
 
                 rmatch_lt!($a, $b, $($other),*);
-            }};
+            };
         }
 
         macro_rules! rmatch_mask {
-            ($a: expr, $b: expr, $fname: ident) => {{
-                if ($a).$fname != DONT_CARE as _ && (($a).$fname & !($b).$fname) != 0 {
+            ($a: expr, $b: expr, $fname: ident) => {
+                if ($a).$fname != DONT_CARE as _ && (($a).$fname & ($b).$fname) == 0 {
+                    log::trace!("Config failed on {}", stringify!($fname));
                     return false;
                 }
-            }};
+            };
 
-            ($a: expr, $b: expr, $fname: ident, $($other: ident),*) => {{
+            ($a: expr, $b: expr, $fname: ident, $($other: ident),*) => {
                 rmatch_mask!($a, $b, $fname);
 
                 rmatch_mask!($a, $b, $($other),*);
-            }};
+            };
         }
 
         macro_rules! rmatch_exact {
-            ($a: expr, $b: expr, $fname: ident) => {{
+            ($a: expr, $b: expr, $fname: ident) => {
                 if ($a).$fname != ($b).$fname {
+                    log::trace!("Config failed on {}", stringify!($fname));
                     return false;
                 }
-            }};
+            };
 
-            ($a: expr, $b: expr, $fname: ident, $($other: ident),*) => {{
+            ($a: expr, $b: expr, $fname: ident, $($other: ident),*) => {
                 rmatch_exact!($a, $b, $fname);
 
                 rmatch_exact!($a, $b, $($other),*);
-            }};
+            };
         }
 
         rmatch!(

@@ -8,6 +8,8 @@ This is nowhere near ready yet.
 
 * It's a large library on its own that incurs a handful of new dependencies.
 * It unavoidably requires a handful of unsafe code.
+* Some of its design principles are diametrically opposed to breadx's. For instance, by the necessity
+  of having to work across the FFI barrier, `breadglx` uses mutexes and shared memory.
 * It is not cross-platform as `breadx` is: it is only supported on Unix operating systems.
 
 ## License

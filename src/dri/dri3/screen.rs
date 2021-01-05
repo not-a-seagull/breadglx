@@ -291,7 +291,6 @@ impl Dri3Screen {
                 thisref.driver_configs,
             )
         });
-        println!("{:?}", &extmap);
 
         thisref.dri_configmap = Some(extmap);
 
@@ -403,12 +402,8 @@ impl Dri3Screen {
                         })
                         .ok_or(breadx::BreadError::StaticMsg("Failed to find FbConfig ID"))?,
                 };
-                let d = Arc::new(Dri3Drawable::new(
-                    dpy.display_mut(),
-                    drawable,
-                    self.clone(),
-                    fbconfig.clone(),
-                )?);
+                let d =
+                    Dri3Drawable::new(dpy.display_mut(), drawable, self.clone(), fbconfig.clone())?;
                 self.inner.drawable_map.insert(drawable, d.clone());
                 Ok(d)
             }
@@ -443,15 +438,13 @@ impl Dri3Screen {
                         })
                         .ok_or(breadx::BreadError::StaticMsg("Failed to find FbConfig ID"))?,
                 };
-                let d = Arc::new(
-                    Dri3Drawable::new_async(
-                        dpy.display_mut(),
-                        drawable,
-                        self.clone(),
-                        fbconfig.clone(),
-                    )
-                    .await?,
-                );
+                let d = Dri3Drawable::new_async(
+                    dpy.display_mut(),
+                    drawable,
+                    self.clone(),
+                    fbconfig.clone(),
+                )
+                .await?;
                 self.inner.drawable_map.insert(drawable, d.clone());
                 Ok(d)
             }

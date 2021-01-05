@@ -117,7 +117,7 @@ fn config_seg_equal(config: &GlConfig, attrib: c_uint, value: c_uint) -> bool {
 
         let res = config.render_type == equivalent;
         if !res {
-            log::debug!(
+            log::trace!(
                 "Config of ID {} failed on __DRI_ATTRIB_RENDER_TYPE",
                 config.fbconfig_id
             );
@@ -134,7 +134,7 @@ fn config_seg_equal(config: &GlConfig, attrib: c_uint, value: c_uint) -> bool {
 
         let res = config.visual_rating == equivalent;
         if !res {
-            log::debug!(
+            log::trace!(
                 "Config of ID {:X} failed on __DRI_ATTRIB_CONFIG_CAVEAT",
                 config.fbconfig_id
             );
@@ -158,7 +158,7 @@ fn config_seg_equal(config: &GlConfig, attrib: c_uint, value: c_uint) -> bool {
         let res = config.bind_to_texture_targets == DONT_CARE
             || config.bind_to_texture_targets == equivalent;
         if !res {
-            log::debug!(
+            log::trace!(
                 "Config of ID {:X} failed on __DRI_ATTRIB_BIND_TO_TEXTURE_TARGETS",
                 config.fbconfig_id
             );
@@ -193,13 +193,11 @@ fn raw_compare(config: &GlConfig, attrib: c_uint, value: c_uint) -> bool {
         })
         .unwrap_or(true);
     if !res {
-        log::debug!(
+        log::trace!(
             "Config of ID 0x{:X} failed on 0x{:X}",
             config.fbconfig_id,
             attrib
         );
-    } else if res && attrib == 1 {
-        println!("Config succeeded on 1");
     }
     res
 }

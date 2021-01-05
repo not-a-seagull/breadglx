@@ -1,6 +1,6 @@
 // MIT/Apache2 License
 
-use breadglx::{GlConfigRule, GlContextRule, GlDisplay};
+use breadglx::{GlConfigRule, GlContextRule, GlDisplay, GlVisualType};
 use breadx::{
     ColormapAlloc, DisplayConnection, EventMask, Pixmap, Result, VisualClass, WindowClass,
     WindowParameters,
@@ -17,11 +17,14 @@ fn main() -> Result<()> {
     let root = conn.display().default_screen().root;
     let mut screen = conn.create_screen(conn.display().default_screen_index())?;
 
+    let extinfo = conn.display_mut().query_extension_immediate("GLX".to_string())?;
+    println!("GLX: {:?}", &extinfo);
+
     // find the ideal framebuffer config for our use
     const FBCONFIG_RULES: &[GlConfigRule] = &[
         GlConfigRule::DrawableType(breadglx::WINDOW_BIT),
         GlConfigRule::RenderType(breadglx::RGBA_BIT),
-        GlConfigRule::VisualType(VisualClass::TrueColor),
+        GlConfigRule::VisualType(GlVisualType::TrueColor),
         GlConfigRule::RedBits(8),
         GlConfigRule::GreenBits(8),
         GlConfigRule::BlueBits(8),
@@ -29,7 +32,7 @@ fn main() -> Result<()> {
         GlConfigRule::DepthBits(24),
         GlConfigRule::StencilBits(8),
         GlConfigRule::DoubleBufferMode(1),
-        //        GlConfigRule::XRenderable(1),
+//        GlConfigRule::XRenderable(1),
     ];
 
     let fbconfig = screen

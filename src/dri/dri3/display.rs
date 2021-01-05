@@ -93,7 +93,7 @@ impl GlInternalDisplay for Dri3Display {
         let fbconfigs: Arc<[GlConfig]> = fbconfigs.into_boxed_slice().into();
         let screen = Dri3Screen::new(dpy, index, visuals.clone(), fbconfigs.clone())?;
 
-        Ok(GlScreen::from_dri3(index, visuals, fbconfigs, screen))
+        Ok(GlScreen::from_dri3(index, fbconfigs, visuals, screen))
     }
 
     #[cfg(feature = "async")]
@@ -116,7 +116,7 @@ impl GlInternalDisplay for Dri3Display {
             let dri3_screen =
                 Dri3Screen::new_async(dpy, index, visuals.clone(), fbconfigs.clone()).await?;
 
-            Ok(GlScreen::from_dri3(index, visuals, fbconfigs, dri3_screen))
+            Ok(GlScreen::from_dri3(index, fbconfigs, visuals, dri3_screen))
         })
     }
 }

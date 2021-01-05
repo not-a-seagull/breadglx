@@ -33,6 +33,7 @@ impl GlConfig {
     #[inline]
     pub fn set_properties(&mut self, props: &[u32], tagged_only: bool, fbconfig_style_tags: bool) {
         const NONTAGGED_CONFIG_PROPS: usize = 18;
+        self.drawable_type |= WINDOW_BIT;
 
         let props = if tagged_only {
             props

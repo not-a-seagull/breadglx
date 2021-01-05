@@ -18,7 +18,7 @@ impl GlConfig {
         let vis = dpy.resolve_request(vis_tok)?;
         let fbs = dpy.resolve_request(fbs_tok)?;
 
-        Ok((
+        let (vis, fbs) = (
             GlConfig::set_from_properties(
                 &vis.property_list,
                 vis.num_properties.try_into().expect(U32_NO_FIT),
@@ -31,7 +31,9 @@ impl GlConfig {
                 fbs.num_fb_configs.try_into().expect(U32_NO_FIT),
                 true,
             ),
-        ))
+        );
+
+        Ok((vis, fbs))
     }
 
     #[cfg(feature = "async")]

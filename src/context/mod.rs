@@ -2,7 +2,7 @@
 
 use super::{config::GlConfig, display::GlDisplay};
 use breadx::{
-    auto::glx,
+    auto::glx::{self, Context},
     display::{Connection, Display},
     Drawable,
 };
@@ -30,7 +30,7 @@ pub struct GlContext {
 
 pub(crate) struct InnerGlContext {
     // xid relating to the current contex
-    xid: glx::Context,
+    pub(crate) xid: glx::Context,
     // the screen associated with this context
     screen: usize,
     // framebuffer config associated with this context
@@ -40,6 +40,8 @@ pub(crate) struct InnerGlContext {
 }
 
 pub(crate) trait GlInternalContext {
+    fn is_direct(&self) -> bool;
+
     /// Bind this context to the given drawable.
     fn bind<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>>(
         &self,
@@ -94,6 +96,11 @@ impl GlContext {
         Arc::get_mut(&mut self.inner)
             .expect("Infallible Arc::get_mut()")
             .inner = disp;
+    }
+
+    #[inline]
+    pub fn xid(&self) -> Context {
+        self.inner.xid
     }
 
     #[inline]
