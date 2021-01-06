@@ -138,6 +138,8 @@ impl GlScreen {
         rules: &[GlContextRule],
         share: Option<&GlContext>,
     ) -> breadx::Result<GlContext> {
+        log::trace!("Creating context...");
+
         // create the base
         let mut ctx = GlContext::new(Context::from_xid(0), self.screen, fbconfig.clone());
         // create the dispatch
@@ -165,6 +167,8 @@ impl GlScreen {
         Arc::get_mut(&mut ctx.inner)
             .expect("Infallible Arc::get_mut()")
             .xid = xid;
+
+        log::trace!("Created context.");
         Ok(ctx)
     }
 

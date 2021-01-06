@@ -1,5 +1,6 @@
 // MIT/Apache2 License
 
+#![feature(const_fn)]
 #![feature(raw_ref_macros)]
 #![cfg(all(not(target_os = "macos"), unix))]
 #![allow(non_snake_case)]

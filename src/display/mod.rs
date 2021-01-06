@@ -71,6 +71,13 @@ impl<'a, Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>> Der
     }
 }
 
+impl<'a, Conn, Dpy> Drop for DisplayLock<'a, Conn, Dpy> {
+    #[inline]
+    fn drop(&mut self) {
+        log::trace!("Dropping display lock...");
+    }
+}
+
 /// The OpenGL context acting as a wrapper.
 #[repr(transparent)]
 pub struct GlDisplay<Conn, Dpy> {
@@ -103,6 +110,8 @@ impl<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>> GlDispl
     /// Lock the mutex containing the internal display.
     #[inline]
     pub fn display(&self) -> DisplayLock<'_, Conn, Dpy> {
+        log::trace!("Creating display lock...");
+
         #[cfg(not(feature = "async"))]
         let base = self
             .inner
@@ -151,9 +160,12 @@ impl GlStats {
 impl<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>> GlDisplay<Conn, Dpy> {
     #[inline]
     pub fn create_screen(&self, screen: usize) -> breadx::Result<GlScreen> {
-        self.inner
+        log::trace!("Creating screen...");
+        let scr = self.inner
             .context
-            .create_screen(&mut *self.display(), screen)
+            .create_screen(&mut *self.display(), screen)?;
+        log::trace!("Created screen.");
+        Ok(scr)
     }
 
     /// Load a drawable's property.
@@ -163,6 +175,8 @@ impl<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>> GlDispl
         drawable: Drawable,
         property: u32,
     ) -> breadx::Result<Option<u32>> {
+        log::trace!("Loading drawable property");
+
         let map = match self.inner.drawable_properties.get(&drawable) {
             Some(map) => map,
             None => {
@@ -231,12 +245,6 @@ impl<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>> GlDispl
             inner: Arc::new(this),
             _phantom: PhantomData,
         })
-    }
-
-    /// Get the visual type associated with the given ID.
-    #[inline]
-    pub fn visual_for_fbconfig(&self, f: &GlConfig) -> Option<&Visualtype> {
-        self.display().visual_id_to_visual(f.visual_id as _)
     }
 }
 

@@ -5,19 +5,25 @@ use breadx::{
     ColormapAlloc, DisplayConnection, EventMask, Pixmap, Result, VisualClass, WindowClass,
     WindowParameters,
 };
-use std::env;
+use log::LevelFilter;
+use std::{io::Write, env, mem};
 
 fn main() -> Result<()> {
-    env::set_var("RUST_LOG", "breadx=warn,breadglx=info");
-    env_logger::init();
+    env_logger::Builder::new()
+        .filter(Some("breadx"), LevelFilter::Warn)
+        .filter(Some("breadglx"), LevelFilter::Info)
+        .init();
 
     // establish a connection, wrap it in a GlDisplay, and use that to produce a GlScreen
     let conn = DisplayConnection::create(None, None)?;
     let mut conn = GlDisplay::new(conn)?;
     let root = conn.display().default_screen().root;
-    let mut screen = conn.create_screen(conn.display().default_screen_index())?;
+    let root_index = conn.display().default_screen_index();
+    let mut screen = conn.create_screen(root_index)?;
 
-    let extinfo = conn.display_mut().query_extension_immediate("GLX".to_string())?;
+    let extinfo = conn
+        .display()
+        .query_extension_immediate("GLX".to_string())?;
     println!("GLX: {:?}", &extinfo);
 
     // find the ideal framebuffer config for our use
@@ -32,7 +38,7 @@ fn main() -> Result<()> {
         GlConfigRule::DepthBits(24),
         GlConfigRule::StencilBits(8),
         GlConfigRule::DoubleBufferMode(1),
-//        GlConfigRule::XRenderable(1),
+        //        GlConfigRule::XRenderable(1),
     ];
 
     let fbconfig = screen
@@ -42,16 +48,15 @@ fn main() -> Result<()> {
         .expect("Could not find valid framebuffer config");
 
     // get the visual information associated with that fbconfig
-    let vis = conn
-        .visual_for_fbconfig(&fbconfig)
+    let mut dpy = conn.display();
+    let vis = dpy
+        .visual_id_to_visual(fbconfig.visual_id as _)
         .expect("Could not match visual to fbconfig");
-    let depth = conn.display().depth_of_visual(vis.visual_id).unwrap();
+    let depth = dpy.depth_of_visual(vis.visual_id).unwrap();
     let vis = vis.visual_id;
 
     // create a colormap identified with the chosen visual style
-    let cmap = conn
-        .display_mut()
-        .create_colormap(root, vis, ColormapAlloc::None)?;
+    let cmap = dpy.create_colormap(root, vis, ColormapAlloc::None)?;
 
     // create a window
     let wp = WindowParameters {
@@ -61,7 +66,7 @@ fn main() -> Result<()> {
         event_mask: Some(EventMask::STRUCTURE_NOTIFY),
         ..Default::default()
     };
-    let win = conn.display_mut().create_window(
+    let win = dpy.create_window(
         root,
         WindowClass::InputOutput,
         Some(depth),
@@ -75,8 +80,11 @@ fn main() -> Result<()> {
     )?;
 
     // set up the window's properties
-    win.set_title(conn.display_mut(), "BreadGLX Demonstration")?;
-    win.map(conn.display_mut())?;
+    win.set_title(&mut *dpy, "BreadGLX Demonstration")?;
+    win.map(&mut *dpy)?;
+
+    // drop the mutex lock
+    mem::drop(dpy);
 
     // now that we have a window, establish a GlContext
     const CONTEXT_RULES: &[GlContextRule] = &[
@@ -97,7 +105,7 @@ fn main() -> Result<()> {
         }
     };
 
-    context.bind(&mut conn, win)?;
+    //context.bind(&mut conn, win)?;
 
     Ok(())
 }

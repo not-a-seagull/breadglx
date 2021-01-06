@@ -402,9 +402,10 @@ impl Dri3Screen {
                         })
                         .ok_or(breadx::BreadError::StaticMsg("Failed to find FbConfig ID"))?,
                 };
-                let d = Dri3Drawable::new(dpy, drawable, self.clone(), fbconfig.clone())?;
-                self.inner.drawable_map.insert(drawable, d.clone());
-                Ok(d)
+                //let d = Dri3Drawable::new(dpy, drawable, self.clone(), fbconfig.clone())?;
+                //self.inner.drawable_map.insert(drawable, d.clone());
+                //Ok(d)
+                panic!()
             }
         }
     }
