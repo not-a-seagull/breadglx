@@ -16,8 +16,7 @@ dlopen = "0.1.8"
 futures-lite = { version = "1.11.2", optional = true }
 libc = "0.2.81"
 log = "0.4"
-once_cell = { version = "1.5.2", features = ["parking_lot"] }
-parking_lot = "0.11"
+once_cell = { version = "1.5.2" }
 tinyvec = { version = "1.1.0", features = ["alloc"] }
 
 [build-dependencies]
@@ -28,7 +27,6 @@ env_logger = "0.8"
 
 [features]
 default = ["dri3"]
-applegl = []
 async = ["breadx/async", "async-io", "async-lock", "blocking", "futures-lite"]
 dri = ["breadx/dri2"]
 dri3 = ["breadx/dri3", "breadx/present", "dri"]

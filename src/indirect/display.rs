@@ -1,6 +1,9 @@
 // MIT/Apache2 License
 
-use crate::{display::GlInternalDisplay, screen::GlScreen};
+use crate::{
+    display::{DisplayLock, GlInternalDisplay},
+    screen::GlScreen,
+};
 use breadx::display::{Connection, Display};
 use std::{fmt, marker::PhantomData};
 
@@ -38,7 +41,7 @@ impl IndirectDisplay {
 impl GlInternalDisplay for IndirectDisplay {
     #[inline]
     fn create_screen<Conn: Connection>(
-        &mut self,
+        &self,
         dpy: &mut Display<Conn>,
         index: usize,
     ) -> breadx::Result<GlScreen> {
@@ -48,7 +51,7 @@ impl GlInternalDisplay for IndirectDisplay {
     #[cfg(feature = "async")]
     #[inline]
     fn create_screen_async<'future, 'a, 'b, Conn: Connection>(
-        &'a mut self,
+        &'a self,
         dpy: &'b mut Display<Conn>,
         index: usize,
     ) -> GenericFuture<'future, breadx::Result<GlScreen>>
@@ -56,6 +59,6 @@ impl GlInternalDisplay for IndirectDisplay {
         'a: 'future,
         'b: 'future,
     {
-        unimplemented!()
+        Box::pin(async { unimplemented!() })
     }
 }

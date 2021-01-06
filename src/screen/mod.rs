@@ -152,7 +152,7 @@ impl GlScreen {
             .map(|c| c as u32)
             .collect();
         // get xid from server
-        let xid = dpy.display_mut().create_context_attribs_arb(
+        let xid = dpy.display().create_context_attribs_arb(
             glx::Fbconfig::const_from_xid(fbconfig.fbconfig_id as _),
             self.screen,
             match share {
@@ -185,12 +185,7 @@ impl GlScreen {
         let mut ctx = GlContext::new(Context::from_xid(0), self.screen, fbconfig.clone());
         let disp = self
             .disp
-            .create_context_async(
-                &mut ctx.inner,
-                fbconfig,
-                rules,
-                share,
-            )
+            .create_context_async(&mut ctx.inner, fbconfig, rules, share)
             .await?;
         ctx.set_dispatch(disp);
         let attribs = GlContextRule::convert_ctx_attrib_to_classic(rules)

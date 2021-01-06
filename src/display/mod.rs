@@ -5,19 +5,32 @@ use breadx::{
     display::{Connection, Display},
     Drawable, Visualtype,
 };
-use std::{collections::HashMap, marker::PhantomData, ops::Range};
+use dashmap::DashMap;
+use std::{
+    collections::HashMap,
+    marker::PhantomData,
+    ops::{Deref, DerefMut, Range},
+    sync::Arc,
+};
+
+#[cfg(not(feature = "async"))]
+use std::sync;
 
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
 
 mod dispatch;
 
-/// The OpenGL context acting as a wrapper.
-pub struct GlDisplay<Conn, Dpy> {
-    // the display that this acts as a wrapper around
-    display: Dpy,
+// We stuff this inside of a GlDisplay.
+struct InnerGlDisplay<Dpy> {
+    #[cfg(not(feature = "async"))]
+    display: sync::Mutex<Dpy>,
+    #[cfg(feature = "async")]
+    display: async_lock::Mutex<Dpy>,
 
     // major and minor versions of GLX
+    major_version: u32,
+    minor_version: u32,
 
     // if the rendering should be direct or hardware accelerated
     direct: bool,
@@ -27,7 +40,41 @@ pub struct GlDisplay<Conn, Dpy> {
     context: dispatch::DisplayDispatch,
 
     // cache that maps the drawables to a map of their properties
-    drawable_properties: HashMap<Drawable, HashMap<u32, u32>>,
+    drawable_properties: DashMap<Drawable, HashMap<u32, u32>>,
+}
+
+/// Represents a lock on the inner display.
+#[repr(transparent)]
+pub struct DisplayLock<'a, Conn, Dpy> {
+    #[cfg(not(feature = "async"))]
+    base: sync::MutexGuard<'a, Dpy>,
+    #[cfg(feature = "async")]
+    base: async_lock::MutexGuard<'a, Dpy>,
+    _phantom: PhantomData<&'a Conn>,
+}
+
+impl<'a, Conn: Connection, Dpy: AsRef<Display<Conn>>> Deref for DisplayLock<'a, Conn, Dpy> {
+    type Target = Display<Conn>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.base.as_ref()
+    }
+}
+
+impl<'a, Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>> DerefMut
+    for DisplayLock<'a, Conn, Dpy>
+{
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.base.as_mut()
+    }
+}
+
+/// The OpenGL context acting as a wrapper.
+#[repr(transparent)]
+pub struct GlDisplay<Conn, Dpy> {
+    inner: Arc<InnerGlDisplay<Dpy>>,
 
     // needed to satisfy type constraints
     _phantom: PhantomData<Conn>,
@@ -36,14 +83,14 @@ pub struct GlDisplay<Conn, Dpy> {
 /// The underlying OpenGL context.
 pub(crate) trait GlInternalDisplay {
     fn create_screen<Conn: Connection>(
-        &mut self,
+        &self,
         dpy: &mut Display<Conn>,
         index: usize,
     ) -> breadx::Result<GlScreen>;
 
     #[cfg(feature = "async")]
     fn create_screen_async<'future, 'a, 'b, Conn: Connection>(
-        &'a mut self,
+        &'a self,
         dpy: &'b mut Display<Conn>,
         index: usize,
     ) -> GenericFuture<'future, breadx::Result<GlScreen>>
@@ -52,43 +99,33 @@ pub(crate) trait GlInternalDisplay {
         'b: 'future;
 }
 
-impl<Conn, Dpy> GlDisplay<Conn, Dpy> {
+impl<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>> GlDisplay<Conn, Dpy> {
+    /// Lock the mutex containing the internal display.
     #[inline]
-    pub fn inner(&self) -> &Dpy {
-        &self.display
+    pub fn display(&self) -> DisplayLock<'_, Conn, Dpy> {
+        #[cfg(not(feature = "async"))]
+        let base = self
+            .inner
+            .display
+            .lock()
+            .expect("Failed to acquire display lock");
+        #[cfg(feature = "async")]
+        let base = async_io::block_on(self.inner.display.lock());
+
+        DisplayLock {
+            base,
+            _phantom: PhantomData,
+        }
     }
 
+    /// Lock the mutex contained the internal display, async redox.
+    #[cfg(feature = "async")]
     #[inline]
-    pub fn inner_mut(&mut self) -> &mut Dpy {
-        &mut self.display
-    }
-}
-
-impl<Conn: Connection, Dpy: AsRef<Display<Conn>>> GlDisplay<Conn, Dpy> {
-    #[inline]
-    pub fn display(&self) -> &Display<Conn> {
-        self.display.as_ref()
-    }
-}
-
-impl<Conn: Connection, Dpy: AsRef<Display<Conn>>> AsRef<Display<Conn>> for GlDisplay<Conn, Dpy> {
-    #[inline]
-    fn as_ref(&self) -> &Display<Conn> {
-        self.display()
-    }
-}
-
-impl<Conn: Connection, Dpy: AsMut<Display<Conn>>> GlDisplay<Conn, Dpy> {
-    #[inline]
-    pub fn display_mut(&mut self) -> &mut Display<Conn> {
-        self.display.as_mut()
-    }
-}
-
-impl<Conn: Connection, Dpy: AsMut<Display<Conn>>> AsMut<Display<Conn>> for GlDisplay<Conn, Dpy> {
-    #[inline]
-    fn as_mut(&mut self) -> &mut Display<Conn> {
-        self.display_mut()
+    pub async fn display_async(&self) -> DisplayLock<'_, Conn, Dpy> {
+        DisplayLock {
+            base: self.inner.display.lock().await,
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -113,60 +150,29 @@ impl GlStats {
 
 impl<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>> GlDisplay<Conn, Dpy> {
     #[inline]
-    pub fn create_screen(&mut self, screen: usize) -> breadx::Result<GlScreen> {
-        self.context.create_screen(self.display.as_mut(), screen)
-    }
-
-    #[cfg(feature = "async")]
-    #[inline]
-    pub async fn create_screen_async(&mut self, index: usize) -> breadx::Result<GlScreen> {
-        self.context
-            .create_screen_async(self.display.as_mut(), index)
-            .await
+    pub fn create_screen(&self, screen: usize) -> breadx::Result<GlScreen> {
+        self.inner
+            .context
+            .create_screen(&mut *self.display(), screen)
     }
 
     /// Load a drawable's property.
     #[inline]
     pub(crate) fn load_drawable_property(
-        &mut self,
+        &self,
         drawable: Drawable,
         property: u32,
     ) -> breadx::Result<Option<u32>> {
-        let map = match self.drawable_properties.get(&drawable) {
+        let map = match self.inner.drawable_properties.get(&drawable) {
             Some(map) => map,
             None => {
                 let repl = self
-                    .display_mut()
+                    .display()
                     .get_drawable_properties_immediate(drawable.into())?;
                 let propmap: HashMap<u32, u32> = repl.chunks(2).map(|kv| (kv[0], kv[1])).collect();
-                self.drawable_properties.insert(drawable, propmap);
-                self.drawable_properties
-                    .get(&drawable)
-                    .expect("Infallible HashMap::get()")
-            }
-        };
-
-        Ok(map.get(&property).copied())
-    }
-
-    /// Load a drawable's property, async redox.
-    #[cfg(feature = "async")]
-    #[inline]
-    pub(crate) async fn load_drawable_property_async(
-        &mut self,
-        drawable: Drawable,
-        property: u32,
-    ) -> breadx::Result<Option<u32>> {
-        let map = match self.drawable_properties.get(&drawable) {
-            Some(map) => map,
-            None => {
-                let repl = self
-                    .display_mut()
-                    .get_drawable_properties_immediate_async(drawable.into())
-                    .await?;
-                self.drawable_properties
-                    .insert(drawable, repl.chunks(2).map(|kv| (kv[0], kv[1])).collect());
-                self.drawable_properties
+                self.inner.drawable_properties.insert(drawable, propmap);
+                self.inner
+                    .drawable_properties
                     .get(&drawable)
                     .expect("Infallible HashMap::get()")
             }
@@ -179,6 +185,9 @@ impl<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>> GlDispl
     pub fn new(mut dpy: Dpy) -> breadx::Result<Self> {
         // create the basic display
         let stats = GlStats::get();
+
+        // get the major and minor version
+        let (major_version, minor_version) = dpy.as_mut().query_glx_version_immediate(1, 1)?;
 
         let mut context: Option<dispatch::DisplayDispatch> = None;
 
@@ -205,16 +214,81 @@ impl<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>> GlDispl
             None => indirect::IndirectDisplay::new(dpy.as_mut())?.into(),
         };
 
-        let mut this = Self {
-            display: dpy,
+        let this = InnerGlDisplay {
+            #[cfg(not(feature = "async"))]
+            display: sync::Mutex::new(dpy),
+            #[cfg(feature = "async")]
+            display: async_lock::Mutex::new(dpy),
             direct: stats.direct,
             accel: stats.accel,
             context,
-            drawable_properties: HashMap::new(),
-            _phantom: PhantomData,
+            drawable_properties: DashMap::new(),
+            major_version,
+            minor_version,
         };
 
-        Ok(this)
+        Ok(Self {
+            inner: Arc::new(this),
+            _phantom: PhantomData,
+        })
+    }
+
+    /// Get the visual type associated with the given ID.
+    #[inline]
+    pub fn visual_for_fbconfig(&self, f: &GlConfig) -> Option<&Visualtype> {
+        self.display().visual_id_to_visual(f.visual_id as _)
+    }
+}
+
+// TODO: make not send, differentiate, etc
+impl<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>> + Send>
+    GlDisplay<Conn, Dpy>
+{
+    #[cfg(feature = "async")]
+    #[inline]
+    pub async fn create_screen_async(&mut self, index: usize) -> breadx::Result<GlScreen> {
+        self.inner
+            .context
+            .create_screen_async(&mut *self.display_async().await, index)
+            .await
+    }
+
+    /// Load a drawable's property, async redox.
+    #[cfg(feature = "async")]
+    #[inline]
+    pub(crate) async fn load_drawable_property_async(
+        &self,
+        drawable: Drawable,
+        property: u32,
+    ) -> breadx::Result<Option<u32>> {
+        // dashmap has a chance of blocking, so we clone ourselves a few times to get around the
+        // blocking calls
+        let this = self.clone();
+
+        let map =
+            match blocking::unblock(move || this.inner.drawable_properties.get(&drawable)).await {
+                Some(map) => map,
+                None => {
+                    let repl = self
+                        .display_async()
+                        .await
+                        .get_drawable_properties_immediate_async(drawable.into())
+                        .await?;
+
+                    let this = self.clone();
+                    blocking::unblock(move || {
+                        this.inner
+                            .drawable_properties
+                            .insert(drawable, repl.chunks(2).map(|kv| (kv[0], kv[1])).collect());
+                        this.inner
+                            .drawable_properties
+                            .get(&drawable)
+                            .expect("Infallible HashMap::get()")
+                    });
+                }
+            };
+
+        Ok(map.get(&property).copied())
     }
 
     #[cfg(feature = "async")]
@@ -222,6 +296,9 @@ impl<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>> GlDispl
     pub async fn new_async(mut dpy: Dpy) -> breadx::Result<Self> {
         // create the basic display
         let stats = GlStats::get();
+
+        let (major_version, minor_version) =
+            dpy.as_mut().query_glx_version_immediate_async(1, 1).await?;
 
         let mut context: Option<dispatch::DisplayDispatch> = None;
 
@@ -252,21 +329,22 @@ impl<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>> GlDispl
                 .into(),
         };
 
-        let mut this = Self {
-            display: dpy,
+        let this = Self {
+            #[cfg(not(feature = "async"))]
+            display: sync::Mutex::new(dpy),
+            #[cfg(feature = "async")]
+            display: async_lock::Mutex::new(dpy),
             direct: stats.direct,
             accel: stats.accel,
             context,
-            drawable_properties: HashMap::new(),
-            _phantom: PhantomData,
+            drawable_properties: DashMap::new(),
+            major_version,
+            minor_version,
         };
 
-        Ok(this)
-    }
-
-    /// Get the visual type associated with the given ID.
-    #[inline]
-    pub fn visual_for_fbconfig(&self, f: &GlConfig) -> Option<&Visualtype> {
-        self.display().visual_id_to_visual(f.visual_id as _)
+        Ok(Self {
+            inner: Arc::new(this),
+            _phantom: PhantomData,
+        })
     }
 }

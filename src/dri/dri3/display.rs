@@ -2,7 +2,7 @@
 
 use crate::{
     config::GlConfig,
-    display::GlInternalDisplay,
+    display::{DisplayLock, GlInternalDisplay},
     dll::Dll,
     dri::dri3::Dri3Screen,
     screen::{self, GlScreen},
@@ -84,7 +84,7 @@ impl Dri3Display {
 impl GlInternalDisplay for Dri3Display {
     #[inline]
     fn create_screen<Conn: Connection>(
-        &mut self,
+        &self,
         dpy: &mut Display<Conn>,
         index: usize,
     ) -> breadx::Result<GlScreen> {
@@ -99,7 +99,7 @@ impl GlInternalDisplay for Dri3Display {
     #[cfg(feature = "async")]
     #[inline]
     fn create_screen_async<'future, 'a, 'b, Conn: Connection>(
-        &'a mut self,
+        &'a self,
         dpy: &'b mut Display<Conn>,
         index: usize,
     ) -> GenericFuture<'future, breadx::Result<GlScreen>>

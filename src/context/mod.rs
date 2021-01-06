@@ -17,9 +17,11 @@ pub(crate) mod dispatch;
 pub(crate) use dispatch::ContextDispatch;
 
 #[cfg(feature = "async")]
-use async_lock::{RwLock, RwLockReadGuard};
+use async_lock::RwLockReadGuard;
 #[cfg(not(feature = "async"))]
-use parking_lot::{lock_api::RawRwLock as _, RawRwLock, RwLock, RwLockReadGuard};
+use once_cell::sync::OnceCell;
+#[cfg(not(feature = "async"))]
+use std::sync::{self, RwLockReadGuard};
 
 /// The context in which OpenGL functions are executed.
 #[repr(transparent)]
@@ -197,17 +199,20 @@ impl GlContext {
 /// GL calls are global (unfortunately). All GL calls should be made onto
 /// this context.
 /// TODO: there HAS to be a better way of doing this
-static CURRENT_CONTEXT: RwLock<Option<GlContext>> = {
-    #[cfg(feature = "async")]
-    {
-        RwLock::new(None)
-    }
+#[cfg(feature = "async")]
+static CURRENT_CONTEXT: async_lock::RwLock<Option<GlContext>> = async_lock::RwLock::new(None);
+#[cfg(not(feature = "async"))]
+static CURRENT_CONTEXT: OnceCell<sync::RwLock<Option<GlContext>>> = OnceCell::new();
 
-    #[cfg(not(feature = "async"))]
-    {
-        RwLock::const_new(RawRwLock::INIT, None)
-    }
-};
+#[cfg(not(feature = "async"))]
+const FAILED_READ: &str = "Failed to acquire read lock for current context";
+#[cfg(not(feature = "async"))]
+const FAILED_WRITE: &str = "Failed to acquire write lock for current context";
+
+#[cfg(not(feature = "async"))]
+fn current_context() -> &'static sync::RwLock<Option<GlContext>> {
+    CURRENT_CONTEXT.get_or_init(|| sync::RwLock::new(None))
+}
 
 #[inline]
 pub(crate) fn get_current_context() -> RwLockReadGuard<'static, Option<GlContext>> {
@@ -215,7 +220,7 @@ pub(crate) fn get_current_context() -> RwLockReadGuard<'static, Option<GlContext
         if #[cfg(feature = "async")] {
             async_io::block_on(get_current_context_async())
         } else {
-            CURRENT_CONTEXT.read()
+            current_context().read().expect(FAILED_READ)
         }
     }
 }
@@ -226,12 +231,10 @@ pub(crate) fn set_current_context(ctx: GlContext) -> Option<GlContext> {
         if #[cfg(feature = "async")] {
             async_io::block_on(set_current_context_async(ctx))
         } else {
-            let mut ctx = Some(ctx);
-            mem::swap(
-                &mut *CURRENT_CONTEXT.write(),
-                &mut ctx,
-            );
-            ctx
+            mem::replace(
+                &mut *current_context().write().expect(FAILED_WRITE),
+                Some(ctx),
+            )
         }
     }
 }
@@ -242,7 +245,7 @@ pub(crate) fn take_current_context() -> Option<GlContext> {
         if #[cfg(feature = "async")] {
             async_io::block_on(take_current_context_async())
         } else {
-            mem::take(&mut *CURRENT_CONTEXT.write())
+            mem::take(&mut *current_context().write().expect(FAILED_WRITE))
         }
     }
 }
@@ -256,9 +259,7 @@ pub(crate) async fn get_current_context_async() -> RwLockReadGuard<'static, Opti
 #[cfg(feature = "async")]
 #[inline]
 pub(crate) async fn set_current_context_async(ctx: GlContext) -> Option<GlContext> {
-    let mut ctx = Some(ctx);
-    mem::swap(&mut *CURRENT_CONTEXT.write().await, &mut ctx);
-    ctx
+    mem::replace(&mut *CURRENT_CONTEXT.write().await, Some(ctx))
 }
 
 #[cfg(feature = "async")]

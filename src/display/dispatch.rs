@@ -1,6 +1,7 @@
 // MIT/Apache2 License
 
 use crate::{
+    display::DisplayLock,
     dri::{dri2, dri3},
     indirect,
     screen::GlScreen,
@@ -48,7 +49,7 @@ impl From<dri3::Dri3Display> for DisplayDispatch {
 impl super::GlInternalDisplay for DisplayDispatch {
     #[inline]
     fn create_screen<Conn: Connection>(
-        &mut self,
+        &self,
         dpy: &mut Display<Conn>,
         index: usize,
     ) -> breadx::Result<GlScreen> {
@@ -64,7 +65,7 @@ impl super::GlInternalDisplay for DisplayDispatch {
     #[cfg(feature = "async")]
     #[inline]
     fn create_screen_async<'future, 'a, 'b, Conn: Connection>(
-        &'a mut self,
+        &'a self,
         dpy: &'b mut Display<Conn>,
         index: usize,
     ) -> GenericFuture<'future, breadx::Result<GlScreen>>

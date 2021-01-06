@@ -1,6 +1,9 @@
 // MIT/Apache2 License
 
-use crate::{display::GlInternalDisplay, screen::GlScreen};
+use crate::{
+    display::{DisplayLock, GlInternalDisplay},
+    screen::GlScreen,
+};
 use breadx::display::{Connection, Display};
 use std::fmt;
 
@@ -33,7 +36,7 @@ impl Dri2Display {
 impl GlInternalDisplay for Dri2Display {
     #[inline]
     fn create_screen<Conn: Connection>(
-        &mut self,
+        &self,
         dpy: &mut Display<Conn>,
         index: usize,
     ) -> breadx::Result<GlScreen> {
@@ -43,7 +46,7 @@ impl GlInternalDisplay for Dri2Display {
     #[cfg(feature = "async")]
     #[inline]
     fn create_screen_async<'future, 'a, 'b, Conn: Connection>(
-        &'a mut self,
+        &'a self,
         dpy: &'b mut Display<Conn>,
         index: usize,
     ) -> GenericFuture<'future, breadx::Result<GlScreen>>
@@ -51,6 +54,6 @@ impl GlInternalDisplay for Dri2Display {
         'a: 'future,
         'b: 'future,
     {
-        unimplemented!()
+        Box::pin(async { unimplemented!() })
     }
 }
