@@ -4,7 +4,7 @@ use super::{Dri3Drawable, Dri3Screen};
 use crate::{
     config::GlConfig,
     context::{ContextDispatch, GlContext, GlContextRule, GlInternalContext, InnerGlContext},
-    display::GlDisplay,
+    display::{DisplayLike, GlDisplay},
     dri::{convert_dri_rules, ffi, DriRules, ExtensionContainer},
 };
 use breadx::{
@@ -23,31 +23,40 @@ use tinyvec::ArrayVec;
 use crate::util::GenericFuture;
 
 #[derive(Debug)]
-struct Dri3ContextInner {
+struct Dri3ContextInner<Dpy> {
     dri_context: NonNull<ffi::__DRIcontext>,
     // Dri3Screen is wrapped in an Arc, we can keep a sneaky reference here
-    screen: Dri3Screen,
+    screen: Dri3Screen<Dpy>,
     fbconfig: GlConfig,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[repr(transparent)]
-pub struct Dri3Context {
-    inner: Arc<Dri3ContextInner>,
+pub struct Dri3Context<Dpy> {
+    inner: Arc<Dri3ContextInner<Dpy>>,
 }
 
-unsafe impl Send for Dri3Context {}
-unsafe impl Sync for Dri3Context {}
+impl<Dpy> Clone for Dri3Context<Dpy> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
 
-impl Dri3Context {
+unsafe impl<Dpy: Send> Send for Dri3Context<Dpy> {}
+unsafe impl<Dpy: Sync> Sync for Dri3Context<Dpy> {}
+
+impl<Dpy: DisplayLike> Dri3Context<Dpy> {
     #[inline]
     fn new_internal(
-        screen: Dri3Screen,
+        screen: Dri3Screen<Dpy>,
         fbconfig: GlConfig,
         rules: &[GlContextRule],
-        share: Option<&GlContext>,
-        base: &Arc<InnerGlContext>,
-    ) -> breadx::Result<Dri3Context> {
+        share: Option<&GlContext<Dpy>>,
+        base: &Arc<InnerGlContext<Dpy>>,
+    ) -> breadx::Result<Dri3Context<Dpy>> {
         // convert the rules to the appropriate set of DRI rules
         let rules = convert_dri_rules(rules)?;
         let attrib = rules.as_dri3_attribs();
@@ -74,7 +83,7 @@ impl Dri3Context {
                 &mut error,
                 // This isn't *that* horribly unsafe if you think about it
                 // See screen.rs for more info
-                &**base as *const InnerGlContext as *mut InnerGlContext as *mut c_void,
+                &**base as *const InnerGlContext<Dpy> as *mut InnerGlContext<Dpy> as *mut c_void,
             )
         };
 
@@ -91,24 +100,24 @@ impl Dri3Context {
 
     #[inline]
     pub(crate) fn new(
-        scr: &Dri3Screen,
+        scr: &Dri3Screen<Dpy>,
         fbconfig: &GlConfig,
         rules: &[GlContextRule],
-        share: Option<&GlContext>,
-        base: &mut Arc<InnerGlContext>,
-    ) -> breadx::Result<Dri3Context> {
+        share: Option<&GlContext<Dpy>>,
+        base: &mut Arc<InnerGlContext<Dpy>>,
+    ) -> breadx::Result<Dri3Context<Dpy>> {
         Self::new_internal(scr.clone(), fbconfig.clone(), rules, share, base)
     }
 
     #[cfg(feature = "async")]
     #[inline]
     pub(crate) async fn new_async(
-        scr: &Dri3Screen,
+        scr: &Dri3Screen<Dpy>,
         fbconfig: &GlConfig,
         rules: &[GlContextRule],
-        share: Option<&GlContext>,
-        base: &mut Arc<InnerGlContext>,
-    ) -> breadx::Result<Dri3Context> {
+        share: Option<&GlContext<Dpy>>,
+        base: &mut Arc<InnerGlContext<Dpy>>,
+    ) -> breadx::Result<Dri3Context<Dpy>> {
         // we can just unblock on it
         let scr = scr.clone();
         let fbconfig = fbconfig.clone();
@@ -125,7 +134,7 @@ impl Dri3Context {
     }
 
     #[inline]
-    fn screen(&self) -> &Dri3Screen {
+    fn screen(&self) -> &Dri3Screen<Dpy> {
         &self.inner.screen
     }
 
@@ -135,16 +144,16 @@ impl Dri3Context {
     }
 }
 
-impl GlInternalContext for Dri3Context {
+impl<Dpy: DisplayLike> GlInternalContext<Dpy> for Dri3Context<Dpy> {
     #[inline]
     fn is_direct(&self) -> bool {
         true
     }
 
     #[inline]
-    fn bind<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>>(
+    fn bind(
         &self,
-        dpy: &mut GlDisplay<Conn, Dpy>,
+        dpy: &GlDisplay<Dpy>,
         read: Option<Drawable>,
         draw: Option<Drawable>,
     ) -> breadx::Result {
@@ -198,15 +207,9 @@ impl GlInternalContext for Dri3Context {
 
     #[cfg(feature = "async")]
     #[inline]
-    fn bind_async<
-        'future,
-        'a,
-        'b,
-        Conn: Connection,
-        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>> + Send,
-    >(
+    fn bind_async<'future, 'a, 'b>(
         &'a self,
-        dpy: &'b mut GlDisplay<Conn, Dpy>,
+        dpy: &'b GlDisplay<Dpy>,
         read: Option<Drawable>,
         draw: Option<Drawable>,
     ) -> GenericFuture<'future, breadx::Result>
@@ -295,7 +298,7 @@ impl GlInternalContext for Dri3Context {
     }
 }
 
-impl Drop for Dri3Context {
+impl<Dpy> Drop for Dri3Context<Dpy> {
     #[inline]
     fn drop(&mut self) {
         // TODO

@@ -105,7 +105,7 @@ fn main() -> Result<()> {
         }
     };
 
-    //context.bind(&mut conn, win)?;
+    context.bind(&mut conn, win)?;
 
     Ok(())
 }

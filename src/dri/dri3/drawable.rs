@@ -5,6 +5,7 @@ use crate::{
     config::GlConfig,
     context::GlInternalContext,
     cstr::{const_cstr, ConstCstr},
+    display::{DisplayLike, GlDisplay},
     dri::ffi,
 };
 use breadx::{
@@ -24,18 +25,19 @@ use crate::util::GenericFuture;
 use futures_lite::future;
 
 #[derive(Debug)]
-pub struct Dri3Drawable {
+pub struct Dri3Drawable<Dpy> {
     drawable: NonNull<ffi::__DRIdrawable>,
     config: GlConfig,
     is_different_gpu: bool,
-    screen: Dri3Screen,
+    screen: Dri3Screen<Dpy>,
     width: u16,
     height: u16,
     swap_interval: c_int,
+    display: GlDisplay<Dpy>, // cloned reference to display
 }
 
-unsafe impl Send for Dri3Drawable {}
-unsafe impl Sync for Dri3Drawable {}
+unsafe impl<Dpy: Send> Send for Dri3Drawable<Dpy> {}
+unsafe impl<Dpy: Sync> Sync for Dri3Drawable<Dpy> {}
 
 const VBLANK_NEVER: c_int = 0;
 const VBLANK_DEF_INTERVAL0: c_int = 1;
@@ -45,12 +47,12 @@ const VBLANK_DEF_ALWAYS_SYNC: c_int = 3;
 const VBLANK_MODE: ConstCstr<'static> = const_cstr(&*b"vblank_mode\0");
 const ADAPTIVE_SYNC: ConstCstr<'static> = const_cstr(&*b"adaptive_sync\0");
 
-impl Dri3Drawable {
+impl<Dpy: DisplayLike> Dri3Drawable<Dpy> {
     #[inline]
-    pub fn new<Conn: Connection>(
-        dpy: &mut Display<Conn>,
+    pub fn new(
+        dpy: &GlDisplay<Dpy>,
         drawable: Drawable,
-        screen: Dri3Screen,
+        screen: Dri3Screen<Dpy>,
         config: GlConfig,
     ) -> breadx::Result<Arc<Self>> {
         let (adaptive_sync, vblank_mode) = get_adaptive_sync_and_vblank_mode(&screen);
@@ -60,11 +62,11 @@ impl Dri3Drawable {
         };
 
         if adaptive_sync == 0 {
-            set_adaptive_sync(dpy, drawable, false)?;
+            set_adaptive_sync(&mut *dpy.display(), drawable, false)?;
         }
 
         // get the width and height of the drawable
-        let geometry = breadx::drawable::get_geometry_immediate(dpy, drawable)?;
+        let geometry = breadx::drawable::get_geometry_immediate(&mut *dpy.display(), drawable)?;
 
         let mut this = Arc::new(Self {
             drawable: NonNull::dangling(),
@@ -74,6 +76,7 @@ impl Dri3Drawable {
             width: geometry.width,
             height: geometry.height,
             swap_interval,
+            display: dpy.clone(),
         });
 
         // create the drawable pointer
@@ -88,10 +91,10 @@ impl Dri3Drawable {
 
     #[cfg(feature = "async")]
     #[inline]
-    pub async fn new_async<Conn: Connection>(
-        dpy: &mut Display<Conn>,
+    pub async fn new_async(
+        dpy: &GlDisplay<Dpy>,
         drawable: Drawable,
-        screen: Dri3Screen,
+        screen: Dri3Screen<Dpy>,
         config: GlConfig,
     ) -> breadx::Result<Arc<Self>> {
         let (adaptive_sync, vblank_mode, screen) = blocking::unblock(move || {
@@ -104,12 +107,17 @@ impl Dri3Drawable {
             _ => 1,
         };
 
-        let geometry = breadx::drawable::get_geometry_immediate_async(dpy, drawable).await?;
+        let geometry = breadx::drawable::get_geometry_immediate_async(
+            &mut *dpy.display_async().await,
+            drawable,
+        )
+        .await?;
 
         // TODO: figure out if this is more expensive than it's worth
         let as_future = if adaptive_sync == 0 {
-            Box::pin(set_adaptive_sync_async(dpy, drawable, false))
-                as GenericFuture<'_, breadx::Result>
+            Box::pin(async {
+                set_adaptive_sync_async(&mut *dpy.display_async().await, drawable, false).await
+            }) as GenericFuture<'_, breadx::Result>
         } else {
             Box::pin(async { Ok(()) }) as GenericFuture<'_, breadx::Result>
         };
@@ -122,6 +130,7 @@ impl Dri3Drawable {
             width: geometry.width,
             height: geometry.height,
             swap_interval,
+            display: dpy.clone(),
         });
 
         let this1 = this.clone();
@@ -172,7 +181,9 @@ impl Dri3Drawable {
 }
 
 #[inline]
-fn get_adaptive_sync_and_vblank_mode(screen: &Dri3Screen) -> (c_uchar, c_int) {
+fn get_adaptive_sync_and_vblank_mode<Dpy: DisplayLike>(
+    screen: &Dri3Screen<Dpy>,
+) -> (c_uchar, c_int) {
     let mut adaptive_sync: c_uchar = 0;
     let mut vblank_mode: c_int = VBLANK_DEF_INTERVAL1;
     if !screen.inner.config.is_null() {
@@ -197,8 +208,8 @@ fn get_adaptive_sync_and_vblank_mode(screen: &Dri3Screen) -> (c_uchar, c_int) {
 }
 
 #[inline]
-fn create_the_drawable(
-    screen: &Dri3Screen,
+fn create_the_drawable<Dpy: DisplayLike>(
+    screen: &Dri3Screen<Dpy>,
     config: &GlConfig,
     drawable: *const c_void,
 ) -> breadx::Result<DriDrawablePtr> {
@@ -284,7 +295,7 @@ async fn set_adaptive_sync_async<Conn: Connection>(
     }
 }
 
-impl Drop for Dri3Drawable {
+impl<Dpy> Drop for Dri3Drawable<Dpy> {
     #[inline]
     fn drop(&mut self) {}
 }

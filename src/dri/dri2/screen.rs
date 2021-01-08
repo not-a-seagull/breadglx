@@ -3,6 +3,7 @@
 use crate::{
     config::GlConfig,
     context::{dispatch::ContextDispatch, GlContext, GlContextRule, InnerGlContext},
+    display::DisplayLike,
     screen::GlInternalScreen,
 };
 use std::sync::Arc;
@@ -11,17 +12,19 @@ use std::sync::Arc;
 use crate::util::GenericFuture;
 
 #[derive(Debug)]
-pub struct Dri2Screen {}
+pub struct Dri2Screen<Dpy> {
+    p: Dpy,
+}
 
-impl GlInternalScreen for Dri2Screen {
+impl<Dpy: DisplayLike> GlInternalScreen<Dpy> for Dri2Screen<Dpy> {
     #[inline]
     fn create_context(
         &self,
-        base: &mut Arc<InnerGlContext>,
+        base: &mut Arc<InnerGlContext<Dpy>>,
         fbconfig: &GlConfig,
         rules: &[GlContextRule],
-        share: Option<&GlContext>,
-    ) -> breadx::Result<ContextDispatch> {
+        share: Option<&GlContext<Dpy>>,
+    ) -> breadx::Result<ContextDispatch<Dpy>> {
         unimplemented!()
     }
 
@@ -29,11 +32,11 @@ impl GlInternalScreen for Dri2Screen {
     #[inline]
     fn create_context_async<'future, 'a, 'b, 'c, 'd, 'e>(
         &'a self,
-        base: &'b mut Arc<InnerGlContext>,
+        base: &'b mut Arc<InnerGlContext<Dpy>>,
         fbconfig: &'c GlConfig,
         rules: &'d [GlContextRule],
-        share: Option<&'e GlContext>,
-    ) -> GenericFuture<'future, breadx::Result<ContextDispatch>>
+        share: Option<&'e GlContext<Dpy>>,
+    ) -> GenericFuture<'future, breadx::Result<ContextDispatch<Dpy>>>
     where
         'a: 'future,
         'b: 'future,

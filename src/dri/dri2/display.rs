@@ -1,7 +1,7 @@
 // MIT/Apache2 License
 
 use crate::{
-    display::{DisplayLock, GlInternalDisplay},
+    display::{DisplayLike, DisplayLock, GlInternalDisplay},
     screen::GlScreen,
 };
 use breadx::display::{Connection, Display};
@@ -10,46 +10,46 @@ use std::fmt;
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
 
-pub struct Dri2Display {}
+pub struct Dri2Display<Dpy> {
+    p: Dpy,
+}
 
-impl fmt::Debug for Dri2Display {
+impl<Dpy> fmt::Debug for Dri2Display<Dpy> {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Dri2Display")
     }
 }
 
-impl Dri2Display {
+impl<Dpy: DisplayLike> Dri2Display<Dpy> {
     #[inline]
-    pub(crate) fn new<Conn: Connection>(dpy: &mut Display<Conn>) -> breadx::Result<Self> {
+    pub(crate) fn new(dpy: &mut Display<Dpy::Conn>) -> breadx::Result<Self> {
         unimplemented!()
     }
 
     #[inline]
-    pub(crate) async fn new_async<Conn: Connection>(
-        dpy: &mut Display<Conn>,
-    ) -> breadx::Result<Self> {
+    pub(crate) async fn new_async(dpy: &mut Display<Dpy::Conn>) -> breadx::Result<Self> {
         unimplemented!()
     }
 }
 
-impl GlInternalDisplay for Dri2Display {
+impl<Dpy: DisplayLike> GlInternalDisplay<Dpy> for Dri2Display<Dpy> {
     #[inline]
-    fn create_screen<Conn: Connection>(
+    fn create_screen(
         &self,
-        dpy: &mut Display<Conn>,
+        dpy: &mut Display<Dpy::Conn>,
         index: usize,
-    ) -> breadx::Result<GlScreen> {
+    ) -> breadx::Result<GlScreen<Dpy>> {
         unimplemented!()
     }
 
     #[cfg(feature = "async")]
     #[inline]
-    fn create_screen_async<'future, 'a, 'b, Conn: Connection>(
+    fn create_screen_async<'future, 'a, 'b>(
         &'a self,
-        dpy: &'b mut Display<Conn>,
+        dpy: &'b mut Display<Dpy::Conn>,
         index: usize,
-    ) -> GenericFuture<'future, breadx::Result<GlScreen>>
+    ) -> GenericFuture<'future, breadx::Result<GlScreen<Dpy>>>
     where
         'a: 'future,
         'b: 'future,

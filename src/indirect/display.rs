@@ -1,7 +1,7 @@
 // MIT/Apache2 License
 
 use crate::{
-    display::{DisplayLock, GlInternalDisplay},
+    display::{DisplayLike, DisplayLock, GlInternalDisplay},
     screen::GlScreen,
 };
 use breadx::display::{Connection, Display};
@@ -10,20 +10,20 @@ use std::{fmt, marker::PhantomData};
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
 
-pub struct IndirectDisplay {
-    _private: PhantomData<()>,
+pub struct IndirectDisplay<Dpy> {
+    _private: PhantomData<Dpy>,
 }
 
-impl fmt::Debug for IndirectDisplay {
+impl<Dpy> fmt::Debug for IndirectDisplay<Dpy> {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("IndirectDisplay")
     }
 }
 
-impl IndirectDisplay {
+impl<Dpy: DisplayLike> IndirectDisplay<Dpy> {
     #[inline]
-    pub fn new<Conn: Connection>(_dpy: &mut Display<Conn>) -> breadx::Result<Self> {
+    pub fn new(_dpy: &mut Display<Dpy::Conn>) -> breadx::Result<Self> {
         Ok(Self {
             _private: PhantomData,
         })
@@ -31,30 +31,30 @@ impl IndirectDisplay {
 
     #[cfg(feature = "async")]
     #[inline]
-    pub async fn new_async<Conn: Connection>(_dpy: &mut Display<Conn>) -> breadx::Result<Self> {
+    pub async fn new_async(_dpy: &mut Display<Dpy::Conn>) -> breadx::Result<Self> {
         Ok(Self {
             _private: PhantomData,
         })
     }
 }
 
-impl GlInternalDisplay for IndirectDisplay {
+impl<Dpy: DisplayLike> GlInternalDisplay<Dpy> for IndirectDisplay<Dpy> {
     #[inline]
-    fn create_screen<Conn: Connection>(
+    fn create_screen(
         &self,
-        dpy: &mut Display<Conn>,
+        dpy: &mut Display<Dpy::Conn>,
         index: usize,
-    ) -> breadx::Result<GlScreen> {
+    ) -> breadx::Result<GlScreen<Dpy>> {
         unimplemented!()
     }
 
     #[cfg(feature = "async")]
     #[inline]
-    fn create_screen_async<'future, 'a, 'b, Conn: Connection>(
+    fn create_screen_async<'future, 'a, 'b>(
         &'a self,
-        dpy: &'b mut Display<Conn>,
+        dpy: &'b mut Display<Dpy::Conn>,
         index: usize,
-    ) -> GenericFuture<'future, breadx::Result<GlScreen>>
+    ) -> GenericFuture<'future, breadx::Result<GlScreen<Dpy>>>
     where
         'a: 'future,
         'b: 'future,

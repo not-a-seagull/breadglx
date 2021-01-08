@@ -1,5 +1,6 @@
 // MIT/Apache2 License
 
+use super::DisplayLike;
 use crate::{
     display::DisplayLock,
     dri::{dri2, dri3},
@@ -15,44 +16,44 @@ use std::boxed::Box;
 
 /// Dispatch for contexts.
 #[derive(Debug)]
-pub(crate) enum DisplayDispatch {
-    Indirect(indirect::IndirectDisplay),
+pub(crate) enum DisplayDispatch<Dpy> {
+    Indirect(indirect::IndirectDisplay<Dpy>),
     #[cfg(feature = "dri")]
-    Dri2(dri2::Dri2Display),
+    Dri2(dri2::Dri2Display<Dpy>),
     #[cfg(feature = "dri3")]
-    Dri3(dri3::Dri3Display),
+    Dri3(dri3::Dri3Display<Dpy>),
 }
 
-impl From<indirect::IndirectDisplay> for DisplayDispatch {
+impl<Dpy> From<indirect::IndirectDisplay<Dpy>> for DisplayDispatch<Dpy> {
     #[inline]
-    fn from(i: indirect::IndirectDisplay) -> Self {
+    fn from(i: indirect::IndirectDisplay<Dpy>) -> Self {
         Self::Indirect(i)
     }
 }
 
 #[cfg(feature = "dri")]
-impl From<dri2::Dri2Display> for DisplayDispatch {
+impl<Dpy> From<dri2::Dri2Display<Dpy>> for DisplayDispatch<Dpy> {
     #[inline]
-    fn from(d2: dri2::Dri2Display) -> Self {
+    fn from(d2: dri2::Dri2Display<Dpy>) -> Self {
         Self::Dri2(d2)
     }
 }
 
 #[cfg(feature = "dri3")]
-impl From<dri3::Dri3Display> for DisplayDispatch {
+impl<Dpy> From<dri3::Dri3Display<Dpy>> for DisplayDispatch<Dpy> {
     #[inline]
-    fn from(d3: dri3::Dri3Display) -> Self {
+    fn from(d3: dri3::Dri3Display<Dpy>) -> Self {
         Self::Dri3(d3)
     }
 }
 
-impl super::GlInternalDisplay for DisplayDispatch {
+impl<Dpy: DisplayLike> super::GlInternalDisplay<Dpy> for DisplayDispatch<Dpy> {
     #[inline]
-    fn create_screen<Conn: Connection>(
+    fn create_screen(
         &self,
-        dpy: &mut Display<Conn>,
+        dpy: &mut Display<Dpy::Conn>,
         index: usize,
-    ) -> breadx::Result<GlScreen> {
+    ) -> breadx::Result<GlScreen<Dpy>> {
         match self {
             Self::Indirect(i) => i.create_screen(dpy, index),
             #[cfg(feature = "dri")]
@@ -64,11 +65,11 @@ impl super::GlInternalDisplay for DisplayDispatch {
 
     #[cfg(feature = "async")]
     #[inline]
-    fn create_screen_async<'future, 'a, 'b, Conn: Connection>(
+    fn create_screen_async<'future, 'a, 'b>(
         &'a self,
-        dpy: &'b mut Display<Conn>,
+        dpy: &'b mut Display<Dpy::Conn>,
         index: usize,
-    ) -> GenericFuture<'future, breadx::Result<GlScreen>>
+    ) -> GenericFuture<'future, breadx::Result<GlScreen<Dpy>>>
     where
         'a: 'future,
         'b: 'future,
