@@ -4,6 +4,7 @@ use super::GlInternalScreen;
 use crate::{
     config::GlConfig,
     context::{ContextDispatch, GlContext, GlContextRule, InnerGlContext},
+    display::DisplayLike,
     dri::{dri2, dri3},
     indirect,
 };
@@ -13,46 +14,46 @@ use std::sync::Arc;
 use crate::util::GenericFuture;
 
 #[derive(Debug)]
-pub(crate) enum ScreenDispatch {
-    Indirect(indirect::IndirectScreen),
+pub(crate) enum ScreenDispatch<Dpy> {
+    Indirect(indirect::IndirectScreen<Dpy>),
     #[cfg(feature = "dri")]
-    Dri2(dri2::Dri2Screen),
+    Dri2(dri2::Dri2Screen<Dpy>),
     #[cfg(feature = "dri3")]
-    Dri3(dri3::Dri3Screen),
+    Dri3(dri3::Dri3Screen<Dpy>),
 }
 
-impl From<indirect::IndirectScreen> for ScreenDispatch {
+impl<Dpy> From<indirect::IndirectScreen<Dpy>> for ScreenDispatch<Dpy> {
     #[inline]
-    fn from(i: indirect::IndirectScreen) -> Self {
+    fn from(i: indirect::IndirectScreen<Dpy>) -> Self {
         Self::Indirect(i)
     }
 }
 
 #[cfg(feature = "dri")]
-impl From<dri2::Dri2Screen> for ScreenDispatch {
+impl<Dpy> From<dri2::Dri2Screen<Dpy>> for ScreenDispatch<Dpy> {
     #[inline]
-    fn from(d2: dri2::Dri2Screen) -> Self {
+    fn from(d2: dri2::Dri2Screen<Dpy>) -> Self {
         Self::Dri2(d2)
     }
 }
 
 #[cfg(feature = "dri3")]
-impl From<dri3::Dri3Screen> for ScreenDispatch {
+impl<Dpy> From<dri3::Dri3Screen<Dpy>> for ScreenDispatch<Dpy> {
     #[inline]
-    fn from(d3: dri3::Dri3Screen) -> Self {
+    fn from(d3: dri3::Dri3Screen<Dpy>) -> Self {
         Self::Dri3(d3)
     }
 }
 
-impl GlInternalScreen for ScreenDispatch {
+impl<Dpy: DisplayLike> GlInternalScreen<Dpy> for ScreenDispatch<Dpy> {
     #[inline]
     fn create_context(
         &self,
-        base: &mut Arc<InnerGlContext>,
+        base: &mut Arc<InnerGlContext<Dpy>>,
         fbconfig: &GlConfig,
         rules: &[GlContextRule],
-        share: Option<&GlContext>,
-    ) -> breadx::Result<ContextDispatch> {
+        share: Option<&GlContext<Dpy>>,
+    ) -> breadx::Result<ContextDispatch<Dpy>> {
         match self {
             Self::Indirect(is) => is.create_context(base, fbconfig, rules, share),
             #[cfg(feature = "dri")]
@@ -66,11 +67,11 @@ impl GlInternalScreen for ScreenDispatch {
     #[inline]
     fn create_context_async<'future, 'a, 'b, 'c, 'd, 'e>(
         &'a self,
-        base: &'b mut Arc<InnerGlContext>,
+        base: &'b mut Arc<InnerGlContext<Dpy>>,
         fbconfig: &'c GlConfig,
         rules: &'d [GlContextRule],
-        share: Option<&'e GlContext>,
-    ) -> GenericFuture<'future, breadx::Result<ContextDispatch>>
+        share: Option<&'e GlContext<Dpy>>,
+    ) -> GenericFuture<'future, breadx::Result<ContextDispatch<Dpy>>>
     where
         'a: 'future,
         'b: 'future,

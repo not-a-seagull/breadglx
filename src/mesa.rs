@@ -10,6 +10,8 @@ use once_cell::sync::Lazy;
 #[cfg(feature = "async")]
 use async_lock::Mutex;
 #[cfg(feature = "async")]
+use futures_lite::future;
+#[cfg(feature = "async")]
 use std::{
     cell::{Cell, UnsafeCell},
     sync::atomic::{AtomicBool, Ordering},
@@ -98,7 +100,7 @@ fn unwrap_result(res: &breadx::Result<Dll>) -> breadx::Result<&Dll> {
 pub(crate) fn gl() -> breadx::Result<&'static Dll> {
     #[cfg(feature = "async")]
     {
-        async_io::block_on(gl_async())
+        future::block_on(gl_async())
     }
     #[cfg(not(feature = "async"))]
     {
@@ -118,7 +120,7 @@ pub(crate) async fn gl_async() -> breadx::Result<&'static Dll> {
 pub(crate) fn drm() -> breadx::Result<&'static Dll> {
     #[cfg(feature = "async")]
     {
-        async_io::block_on(drm_async())
+        future::block_on(drm_async())
     }
     #[cfg(not(feature = "async"))]
     {

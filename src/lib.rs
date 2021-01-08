@@ -1,8 +1,11 @@
 // MIT/Apache2 License
 
-#![feature(const_fn)]
-#![feature(raw_ref_macros)]
-#![cfg(unix)]
+#![feature(const_fn)] // need this for creating PCI tables for DRI
+#![feature(raw_ref_macros)] // need this for partial initialization of uninit memory
+#![feature(trait_alias)]
+// makes things about 100 times more convenient, could be removed
+// but since we're already pinned to nightly, why not?
+#![cfg(all(not(target_os = "macos"), unix))]
 #![allow(non_snake_case)]
 
 pub(crate) mod auto;

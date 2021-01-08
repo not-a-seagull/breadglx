@@ -5,7 +5,7 @@ use crate::{
     config::{GlConfig, GLX_FBCONFIG_ID},
     context::{dispatch::ContextDispatch, GlContext, GlContextRule, InnerGlContext},
     cstr::{const_cstr, ConstCstr},
-    display::GlDisplay,
+    display::{DisplayLike, GlDisplay},
     dll::Dll,
     dri::{config, ffi, load},
     screen::GlInternalScreen,
@@ -27,13 +27,22 @@ use std::{
 use crate::util::GenericFuture;
 
 #[repr(transparent)]
-#[derive(Debug, Clone)]
-pub struct Dri3Screen {
-    pub(crate) inner: Arc<Dri3ScreenInner>,
+#[derive(Debug)]
+pub struct Dri3Screen<Dpy> {
+    pub(crate) inner: Arc<Dri3ScreenInner<Dpy>>,
+}
+
+impl<Dpy> Clone for Dri3Screen<Dpy> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 #[derive(Debug)]
-pub struct Dri3ScreenInner {
+pub struct Dri3ScreenInner<Dpy> {
     // the library loaded for the DRI layer
     driver: Dll,
     // the fd the screen is running on
@@ -48,7 +57,7 @@ pub struct Dri3ScreenInner {
     dri_configmap: Option<HashMap<u64, NonNull<ffi::__DRIconfig>>>,
 
     // a map matching X11 drawables to DRI3 drawables
-    drawable_map: DashMap<Drawable, Arc<Dri3Drawable>>,
+    drawable_map: DashMap<Drawable, Arc<Dri3Drawable<Dpy>>>,
 
     // store the fbconfigs and visualinfos in here as well
     fbconfigs: Arc<[GlConfig]>,
@@ -67,10 +76,10 @@ pub struct Dri3ScreenInner {
     driver_configs: *mut *const ffi::__DRIconfig,
 }
 
-unsafe impl Send for Dri3ScreenInner {}
-unsafe impl Sync for Dri3ScreenInner {}
+unsafe impl<Dpy: Send> Send for Dri3ScreenInner<Dpy> {}
+unsafe impl<Dpy: Sync> Sync for Dri3ScreenInner<Dpy> {}
 
-impl Dri3ScreenInner {
+impl<Dpy: DisplayLike> Dri3ScreenInner<Dpy> {
     #[inline]
     fn get_extensions_core(
         &mut self,
@@ -139,7 +148,7 @@ impl Dri3ScreenInner {
                 // an immutable reference. in order to hold the variant that this memory is shared, we use an
                 // Arc instead of a Box later on
                 // (We also use the arc to simplify some async logic, but don't tell anyone that)
-                self as *mut Dri3ScreenInner as *mut c_void,
+                self as *mut Dri3ScreenInner<Dpy> as *mut c_void,
             )
         };
         let dri_screen = NonNull::new(dri_screen)
@@ -194,10 +203,10 @@ fn get_bootstrap_extensions(
     }
 }
 
-impl Dri3Screen {
+impl<Dpy: DisplayLike> Dri3Screen<Dpy> {
     #[inline]
-    pub(crate) fn new<Conn: Connection>(
-        dpy: &mut Display<Conn>,
+    pub(crate) fn new(
+        dpy: &mut Display<Dpy::Conn>,
         scr: usize,
         visuals: Arc<[GlConfig]>,
         fbconfigs: Arc<[GlConfig]>,
@@ -226,8 +235,8 @@ impl Dri3Screen {
     }
 
     #[inline]
-    fn new_blocking<Conn: Connection>(
-        dpy: &mut Display<Conn>,
+    fn new_blocking(
+        dpy: &mut Display<Dpy::Conn>,
         scr: usize,
         visuals: Arc<[GlConfig]>,
         fbconfigs: Arc<[GlConfig]>,
@@ -299,8 +308,8 @@ impl Dri3Screen {
 
     #[cfg(feature = "async")]
     #[inline]
-    pub async fn new_async<Conn: Connection>(
-        dpy: &mut Display<Conn>,
+    pub async fn new_async(
+        dpy: &mut Display<Dpy::Conn>,
         scr: usize,
         visuals: Arc<[GlConfig]>,
         fbconfigs: Arc<[GlConfig]>,
@@ -342,7 +351,7 @@ impl Dri3Screen {
         });
 
         // use the image driver to actually create the screen
-        let this = blocking::unblock(move || -> breadx::Result<Arc<Dri3ScreenInner>> {
+        let this = blocking::unblock(move || -> breadx::Result<Arc<Dri3ScreenInner<Dpy>>> {
             let exts = unsafe { &mut *(extensions.as_mut_slice() as *mut [ExtensionContainer]) };
 
             let thisref = Arc::get_mut(&mut this).expect("Infallible Arc::get_mut()");
@@ -378,15 +387,12 @@ impl Dri3Screen {
 
     /// Get the DRI drawable associated with an X11 drawable.
     #[inline]
-    pub(crate) fn fetch_dri_drawable<
-        Conn: Connection,
-        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>,
-    >(
+    pub(crate) fn fetch_dri_drawable(
         &self,
-        dpy: &mut GlDisplay<Conn, Dpy>,
-        context: &Dri3Context,
+        dpy: &GlDisplay<Dpy>,
+        context: &Dri3Context<Dpy>,
         drawable: Drawable,
-    ) -> breadx::Result<Arc<Dri3Drawable>> {
+    ) -> breadx::Result<Arc<Dri3Drawable<Dpy>>> {
         match self.inner.drawable_map.get(&drawable) {
             Some(d) => Ok(d.clone()),
             None => {
@@ -402,8 +408,7 @@ impl Dri3Screen {
                         })
                         .ok_or(breadx::BreadError::StaticMsg("Failed to find FbConfig ID"))?,
                 };
-                let d =
-                    Dri3Drawable::new(dpy.display_mut(), drawable, self.clone(), fbconfig.clone())?;
+                let d = Dri3Drawable::new(dpy, drawable, self.clone(), fbconfig.clone())?;
                 self.inner.drawable_map.insert(drawable, d.clone());
                 Ok(d)
             }
@@ -413,15 +418,12 @@ impl Dri3Screen {
     /// Get the DRI drawable associated with an X11 drawable, async redox.
     #[cfg(feature = "async")]
     #[inline]
-    pub(crate) async fn fetch_dri_drawable_async<
-        Conn: Connection,
-        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>,
-    >(
+    pub(crate) async fn fetch_dri_drawable_async(
         &self,
-        dpy: &mut GlDisplay<Conn, Dpy>,
-        context: &Dri3Context,
+        dpy: &GlDisplay<Dpy>,
+        context: &Dri3Context<Dpy>,
         drawable: Drawable,
-    ) -> breadx::Result<Arc<Dri3Drawable>> {
+    ) -> breadx::Result<Arc<Dri3Drawable<Dpy>>> {
         match self.inner.drawable_map.get(&drawable) {
             Some(d) => Ok(d.clone()),
             None => {
@@ -439,7 +441,7 @@ impl Dri3Screen {
                         .ok_or(breadx::BreadError::StaticMsg("Failed to find FbConfig ID"))?,
                 };
                 let d = Dri3Drawable::new_async(
-                    dpy.display_mut(),
+                    &dpy,
                     drawable,
                     self.clone(),
                     fbconfig.clone(),
@@ -452,15 +454,15 @@ impl Dri3Screen {
     }
 }
 
-impl GlInternalScreen for Dri3Screen {
+impl<Dpy: DisplayLike> GlInternalScreen<Dpy> for Dri3Screen<Dpy> {
     #[inline]
     fn create_context(
         &self,
-        base: &mut Arc<InnerGlContext>,
+        base: &mut Arc<InnerGlContext<Dpy>>,
         fbconfig: &GlConfig,
         rules: &[GlContextRule],
-        share: Option<&GlContext>,
-    ) -> breadx::Result<ContextDispatch> {
+        share: Option<&GlContext<Dpy>>,
+    ) -> breadx::Result<ContextDispatch<Dpy>> {
         let cfg = super::Dri3Context::new(self, fbconfig, rules, share, base)?;
         Ok(cfg.into())
     }
@@ -468,11 +470,11 @@ impl GlInternalScreen for Dri3Screen {
     #[cfg(feature = "async")]
     fn create_context_async<'future, 'a, 'b, 'c, 'd, 'e>(
         &'a self,
-        base: &'b mut Arc<InnerGlContext>,
+        base: &'b mut Arc<InnerGlContext<Dpy>>,
         fbconfig: &'c GlConfig,
         rules: &'d [GlContextRule],
-        share: Option<&'e GlContext>,
-    ) -> GenericFuture<'future, breadx::Result<ContextDispatch>>
+        share: Option<&'e GlContext<Dpy>>,
+    ) -> GenericFuture<'future, breadx::Result<ContextDispatch<Dpy>>>
     where
         'a: 'future,
         'b: 'future,
@@ -487,7 +489,7 @@ impl GlInternalScreen for Dri3Screen {
     }
 }
 
-impl Drop for Dri3ScreenInner {
+impl<Dpy> Drop for Dri3ScreenInner<Dpy> {
     #[inline]
     fn drop(&mut self) {
         // destroy the screen

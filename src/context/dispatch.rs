@@ -2,7 +2,7 @@
 
 use super::GlInternalContext;
 use crate::{
-    display::GlDisplay,
+    display::{DisplayLike, GlDisplay},
     dri::{dri2, dri3},
     indirect,
 };
@@ -14,39 +14,39 @@ use breadx::{
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
 
-pub enum ContextDispatch {
-    Indirect(indirect::IndirectContext),
+pub enum ContextDispatch<Dpy> {
+    Indirect(indirect::IndirectContext<Dpy>),
     Placeholder,
     #[cfg(feature = "dri")]
-    Dri2(dri2::Dri2Context),
+    Dri2(dri2::Dri2Context<Dpy>),
     #[cfg(feature = "dri3")]
-    Dri3(dri3::Dri3Context),
+    Dri3(dri3::Dri3Context<Dpy>),
 }
 
-impl From<indirect::IndirectContext> for ContextDispatch {
+impl<Dpy> From<indirect::IndirectContext<Dpy>> for ContextDispatch<Dpy> {
     #[inline]
-    fn from(i: indirect::IndirectContext) -> Self {
+    fn from(i: indirect::IndirectContext<Dpy>) -> Self {
         Self::Indirect(i)
     }
 }
 
 #[cfg(feature = "dri")]
-impl From<dri2::Dri2Context> for ContextDispatch {
+impl<Dpy> From<dri2::Dri2Context<Dpy>> for ContextDispatch<Dpy> {
     #[inline]
-    fn from(d2: dri2::Dri2Context) -> Self {
+    fn from(d2: dri2::Dri2Context<Dpy>) -> Self {
         Self::Dri2(d2)
     }
 }
 
 #[cfg(feature = "dri3")]
-impl From<dri3::Dri3Context> for ContextDispatch {
+impl<Dpy> From<dri3::Dri3Context<Dpy>> for ContextDispatch<Dpy> {
     #[inline]
-    fn from(d3: dri3::Dri3Context) -> Self {
+    fn from(d3: dri3::Dri3Context<Dpy>) -> Self {
         Self::Dri3(d3)
     }
 }
 
-impl GlInternalContext for ContextDispatch {
+impl<Dpy: DisplayLike> GlInternalContext<Dpy> for ContextDispatch<Dpy> {
     #[inline]
     fn is_direct(&self) -> bool {
         match self {
@@ -60,9 +60,9 @@ impl GlInternalContext for ContextDispatch {
     }
 
     #[inline]
-    fn bind<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>>(
+    fn bind(
         &self,
-        dpy: &mut GlDisplay<Conn, Dpy>,
+        dpy: &GlDisplay<Dpy>,
         read: Option<Drawable>,
         draw: Option<Drawable>,
     ) -> breadx::Result<()> {
@@ -78,15 +78,9 @@ impl GlInternalContext for ContextDispatch {
 
     #[cfg(feature = "async")]
     #[inline]
-    fn bind_async<
-        'future,
-        'a,
-        'b,
-        Conn: Connection,
-        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>> + Send,
-    >(
+    fn bind_async<'future, 'a, 'b>(
         &'a self,
-        dpy: &'b mut GlDisplay<Conn, Dpy>,
+        dpy: &'b GlDisplay<Dpy>,
         read: Option<Drawable>,
         draw: Option<Drawable>,
     ) -> GenericFuture<'future, breadx::Result<()>>

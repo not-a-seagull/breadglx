@@ -5,7 +5,7 @@ use crate::{
     context::{
         dispatch::ContextDispatch, GlContext, GlContextRule, GlInternalContext, InnerGlContext,
     },
-    display::GlDisplay,
+    display::{DisplayLike, GlDisplay},
     dri::{dri2, dri3},
     indirect,
 };
@@ -23,44 +23,45 @@ mod dispatch;
 
 /// The screen used by the GL system.
 #[derive(Debug)]
-pub struct GlScreen {
+pub struct GlScreen<Dpy> {
     // the screen number
     screen: usize,
     // the internal dispatch mechanism
-    disp: dispatch::ScreenDispatch,
+    disp: dispatch::ScreenDispatch<Dpy>,
 
     fbconfigs: Arc<[GlConfig]>,
     visuals: Arc<[GlConfig]>,
 }
 
-pub(crate) trait GlInternalScreen {
+pub(crate) trait GlInternalScreen<Dpy: DisplayLike> {
     /// Create a new gl context for this screen.
     fn create_context(
         &self,
-        base: &mut Arc<InnerGlContext>,
+        base: &mut Arc<InnerGlContext<Dpy>>,
         fbconfig: &GlConfig,
         rules: &[GlContextRule],
-        share: Option<&GlContext>,
-    ) -> breadx::Result<ContextDispatch>;
+        share: Option<&GlContext<Dpy>>,
+    ) -> breadx::Result<ContextDispatch<Dpy>>;
 
     /// Async redox
     #[cfg(feature = "async")]
     fn create_context_async<'future, 'a, 'b, 'c, 'd, 'e>(
         &'a self,
-        base: &'b mut Arc<InnerGlContext>,
+        base: &'b mut Arc<InnerGlContext<Dpy>>,
         fbconfig: &'c GlConfig,
         rules: &'d [GlContextRule],
-        share: Option<&'e GlContext>,
-    ) -> GenericFuture<'future, breadx::Result<ContextDispatch>>
+        share: Option<&'e GlContext<Dpy>>,
+    ) -> GenericFuture<'future, breadx::Result<ContextDispatch<Dpy>>>
     where
         'a: 'future,
         'b: 'future,
         'c: 'future,
         'd: 'future,
-        'e: 'future;
+        'e: 'future,
+        Dpy: Send;
 }
 
-impl GlScreen {
+impl<Dpy: DisplayLike> GlScreen<Dpy> {
     #[inline]
     pub fn screen_index(&self) -> usize {
         self.screen
@@ -71,7 +72,7 @@ impl GlScreen {
         screen: usize,
         fbconfigs: Arc<[GlConfig]>,
         visuals: Arc<[GlConfig]>,
-        i: indirect::IndirectScreen,
+        i: indirect::IndirectScreen<Dpy>,
     ) -> Self {
         Self {
             screen,
@@ -87,7 +88,7 @@ impl GlScreen {
         screen: usize,
         fbconfigs: Arc<[GlConfig]>,
         visuals: Arc<[GlConfig]>,
-        d2: dri2::Dri2Screen,
+        d2: dri2::Dri2Screen<Dpy>,
     ) -> Self {
         Self {
             screen,
@@ -103,7 +104,7 @@ impl GlScreen {
         screen: usize,
         fbconfigs: Arc<[GlConfig]>,
         visuals: Arc<[GlConfig]>,
-        d3: dri3::Dri3Screen,
+        d3: dri3::Dri3Screen<Dpy>,
     ) -> Self {
         Self {
             screen,
@@ -131,13 +132,15 @@ impl GlScreen {
 
     /// Create an OpenGL context.
     #[inline]
-    pub fn create_context<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>>(
+    pub fn create_context(
         &self,
-        dpy: &mut GlDisplay<Conn, Dpy>,
+        dpy: &GlDisplay<Dpy>,
         fbconfig: &GlConfig,
         rules: &[GlContextRule],
-        share: Option<&GlContext>,
-    ) -> breadx::Result<GlContext> {
+        share: Option<&GlContext<Dpy>>,
+    ) -> breadx::Result<GlContext<Dpy>> {
+        log::trace!("Creating context...");
+
         // create the base
         let mut ctx = GlContext::new(Context::from_xid(0), self.screen, fbconfig.clone());
         // create the dispatch
@@ -152,7 +155,7 @@ impl GlScreen {
             .map(|c| c as u32)
             .collect();
         // get xid from server
-        let xid = dpy.display_mut().create_context_attribs_arb(
+        let xid = dpy.display().create_context_attribs_arb(
             glx::Fbconfig::const_from_xid(fbconfig.fbconfig_id as _),
             self.screen,
             match share {
@@ -165,32 +168,28 @@ impl GlScreen {
         Arc::get_mut(&mut ctx.inner)
             .expect("Infallible Arc::get_mut()")
             .xid = xid;
+
+        log::trace!("Created context.");
         Ok(ctx)
     }
+}
 
+impl<Dpy: DisplayLike> GlScreen<Dpy> {
     /// Create an OpenGL context, async redox.
     #[cfg(feature = "async")]
     #[inline]
-    pub async fn create_context_async<
-        Conn: Connection,
-        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>,
-    >(
+    pub async fn create_context_async(
         &self,
-        dpy: &mut GlDisplay<Conn, Dpy>,
+        dpy: &GlDisplay<Dpy>,
         fbconfig: &GlConfig,
         rules: &[GlContextRule],
-        share: Option<&GlContext>,
-    ) -> breadx::Result<GlContext> {
+        share: Option<&GlContext<Dpy>>,
+    ) -> breadx::Result<GlContext<Dpy>> {
         // as above, so below
         let mut ctx = GlContext::new(Context::from_xid(0), self.screen, fbconfig.clone());
         let disp = self
             .disp
-            .create_context_async(
-                &mut ctx.inner,
-                fbconfig,
-                rules,
-                share,
-            )
+            .create_context_async(&mut ctx.inner, fbconfig, rules, share)
             .await?;
         ctx.set_dispatch(disp);
         let attribs = GlContextRule::convert_ctx_attrib_to_classic(rules)
@@ -198,7 +197,8 @@ impl GlScreen {
             .map(|c| c as u32)
             .collect();
         let xid = dpy
-            .display_mut()
+            .display_async()
+            .await
             .create_context_attribs_arb_async(
                 glx::Fbconfig::const_from_xid(fbconfig.fbconfig_id as _),
                 self.screen,

@@ -35,6 +35,7 @@ impl Dll {
     }
 
     /// Load a function.
+    #[inline]
     pub unsafe fn function<T>(&self, name: &CStr) -> Option<T> {
         if mem::size_of::<T>() != mem::size_of::<NonNull<c_void>>() {
             panic!("Object is not the size of a pointer");

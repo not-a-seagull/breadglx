@@ -1,6 +1,9 @@
 // MIT/Apache2 License
 
-use crate::{context::GlInternalContext, display::GlDisplay};
+use crate::{
+    context::GlInternalContext,
+    display::{DisplayLike, GlDisplay},
+};
 use breadx::{
     display::{Connection, Display},
     Drawable,
@@ -9,18 +12,20 @@ use breadx::{
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
 
-pub struct Dri2Context {}
+pub struct Dri2Context<Dpy> {
+    p: Dpy,
+}
 
-impl GlInternalContext for Dri2Context {
+impl<Dpy: DisplayLike> GlInternalContext<Dpy> for Dri2Context<Dpy> {
     #[inline]
     fn is_direct(&self) -> bool {
         true
     }
 
     #[inline]
-    fn bind<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>>(
+    fn bind(
         &self,
-        dpy: &mut GlDisplay<Conn, Dpy>,
+        dpy: &GlDisplay<Dpy>,
         read: Option<Drawable>,
         draw: Option<Drawable>,
     ) -> breadx::Result {
@@ -29,15 +34,9 @@ impl GlInternalContext for Dri2Context {
 
     #[cfg(feature = "async")]
     #[inline]
-    fn bind_async<
-        'future,
-        'a,
-        'b,
-        Conn: Connection,
-        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>> + Send,
-    >(
+    fn bind_async<'future, 'a, 'b>(
         &'a self,
-        dpy: &'b mut GlDisplay<Conn, Dpy>,
+        dpy: &'b GlDisplay<Dpy>,
         read: Option<Drawable>,
         draw: Option<Drawable>,
     ) -> GenericFuture<'future, breadx::Result>

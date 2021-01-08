@@ -1,12 +1,15 @@
 // MIT/Apache2 License
 
-use super::{config::GlConfig, display::GlDisplay};
+use super::{
+    config::GlConfig,
+    display::{DisplayLike, GlDisplay},
+};
 use breadx::{
     auto::glx::{self, Context},
     display::{Connection, Display},
     Drawable,
 };
-use std::{mem, sync::Arc};
+use std::{any::Any, mem, sync::Arc};
 
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
@@ -17,18 +20,31 @@ pub(crate) mod dispatch;
 pub(crate) use dispatch::ContextDispatch;
 
 #[cfg(feature = "async")]
-use async_lock::{RwLock, RwLockReadGuard};
+use async_lock::RwLockReadGuard;
+#[cfg(feature = "async")]
+use futures_lite::future;
+
 #[cfg(not(feature = "async"))]
-use parking_lot::{lock_api::RawRwLock as _, RawRwLock, RwLock, RwLockReadGuard};
+use once_cell::sync::OnceCell;
+#[cfg(not(feature = "async"))]
+use std::sync::{self, RwLockReadGuard};
 
 /// The context in which OpenGL functions are executed.
 #[repr(transparent)]
-#[derive(Clone)]
-pub struct GlContext {
-    pub(crate) inner: Arc<InnerGlContext>,
+pub struct GlContext<Dpy> {
+    pub(crate) inner: Arc<InnerGlContext<Dpy>>,
 }
 
-pub(crate) struct InnerGlContext {
+impl<Dpy> Clone for GlContext<Dpy> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+pub(crate) struct InnerGlContext<Dpy> {
     // xid relating to the current contex
     pub(crate) xid: glx::Context,
     // the screen associated with this context
@@ -36,30 +52,24 @@ pub(crate) struct InnerGlContext {
     // framebuffer config associated with this context
     fbconfig: GlConfig,
     // inner mechanism
-    inner: dispatch::ContextDispatch,
+    inner: ContextDispatch<Dpy>,
 }
 
-pub(crate) trait GlInternalContext {
+pub(crate) trait GlInternalContext<Dpy: DisplayLike> {
     fn is_direct(&self) -> bool;
 
     /// Bind this context to the given drawable.
-    fn bind<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>>(
+    fn bind(
         &self,
-        dpy: &mut GlDisplay<Conn, Dpy>,
+        dpy: &GlDisplay<Dpy>,
         read: Option<Drawable>,
         draw: Option<Drawable>,
     ) -> breadx::Result<()>;
 
     #[cfg(feature = "async")]
-    fn bind_async<
-        'future,
-        'a,
-        'b,
-        Conn: Connection,
-        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>> + Send,
-    >(
+    fn bind_async<'future, 'a, 'b>(
         &'a self,
-        dpy: &'b mut GlDisplay<Conn, Dpy>,
+        dpy: &'b GlDisplay<Dpy>,
         read: Option<Drawable>,
         draw: Option<Drawable>,
     ) -> GenericFuture<'future, breadx::Result<()>>
@@ -73,9 +83,9 @@ pub(crate) trait GlInternalContext {
     fn unbind_async<'future>(&'future self) -> GenericFuture<'future, breadx::Result<()>>;
 }
 
-impl GlContext {
+impl<Dpy: DisplayLike> GlContext<Dpy> {
     #[inline]
-    pub(crate) fn dispatch(&self) -> &dispatch::ContextDispatch {
+    pub(crate) fn dispatch(&self) -> &ContextDispatch<Dpy> {
         &self.inner.inner
     }
 
@@ -92,7 +102,7 @@ impl GlContext {
     }
 
     #[inline]
-    pub(crate) fn set_dispatch(&mut self, disp: ContextDispatch) {
+    pub(crate) fn set_dispatch(&mut self, disp: ContextDispatch<Dpy>) {
         Arc::get_mut(&mut self.inner)
             .expect("Infallible Arc::get_mut()")
             .inner = disp;
@@ -104,16 +114,17 @@ impl GlContext {
     }
 
     #[inline]
-    fn bind_internal<Conn: Connection, Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>>(
+    fn bind_internal(
         &self,
-        dpy: &mut GlDisplay<Conn, Dpy>,
+        dpy: &GlDisplay<Dpy>,
         read: Option<Drawable>,
         draw: Option<Drawable>,
-    ) -> breadx::Result<Option<GlContext>> {
+    ) -> breadx::Result<Option<GlContext<Dpy>>> {
         // get this and unbind the old
         let old_gc = get_current_context();
+        let old_gc_ref = old_gc.as_ref().and_then(|m| promote_anyarc_ref(m));
 
-        if let Some(old_gc) = &*old_gc {
+        if let Some(old_gc) = old_gc_ref {
             if Arc::ptr_eq(&self.inner, &old_gc.inner) {
                 log::warn!("Attempted to set currently active GlContext as active.");
                 return Ok(None);
@@ -121,31 +132,33 @@ impl GlContext {
         }
 
         self.inner.inner.bind(dpy, read, draw)?;
-        if let Some(old_gc) = &*old_gc {
+        if let Some(old_gc) = old_gc_ref {
             old_gc.inner.inner.unbind()?;
         }
 
         // bind the current gc to the old one
         mem::drop(old_gc);
         let old_gc = set_current_context(self.clone());
+
+        // try to promote the GC to the proper version
+        let old_gc = old_gc.and_then(|old_gc| promote_anyarc(old_gc));
+
         Ok(old_gc)
     }
 
     #[cfg(feature = "async")]
     #[inline]
-    async fn bind_internal_async<
-        Conn: Connection,
-        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>> + Send,
-    >(
+    async fn bind_internal_async(
         &self,
-        dpy: &mut GlDisplay<Conn, Dpy>,
+        dpy: &GlDisplay<Dpy>,
         read: Option<Drawable>,
         draw: Option<Drawable>,
-    ) -> breadx::Result<Option<GlContext>> {
+    ) -> breadx::Result<Option<GlContext<Dpy>>> {
         // get this and unbind the old
         let old_gc = get_current_context_async().await;
+        let old_gc_ref = old_gc.as_ref().and_then(|m| promote_anyarc_ref(m));
 
-        if let Some(old_gc) = &*old_gc {
+        if let Some(old_gc) = old_gc_ref {
             if Arc::ptr_eq(&self.inner, &old_gc.inner) {
                 log::warn!("Attempted to set currently active GlContext as active.");
                 return Ok(None);
@@ -153,116 +166,141 @@ impl GlContext {
         }
 
         self.inner.inner.bind_async(dpy, read, draw).await?;
-        if let Some(old_gc) = &*old_gc {
+        if let Some(old_gc) = old_gc_ref {
             old_gc.inner.inner.unbind_async().await?;
         }
 
         // bind the current gc to the old one
         mem::drop(old_gc);
         let old_gc = set_current_context_async(self.clone()).await;
+
+        // try to promote the GC to the proper version
+        let old_gc = old_gc.and_then(|old_gc| promote_anyarc(old_gc));
+
         Ok(old_gc)
     }
 
     #[inline]
-    pub fn bind<
-        Conn: Connection,
-        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>>,
-        Target: Into<Drawable>,
-    >(
+    pub fn bind<Target: Into<Drawable>>(
         &self,
-        dpy: &mut GlDisplay<Conn, Dpy>,
+        dpy: &GlDisplay<Dpy>,
         draw: Target,
-    ) -> breadx::Result<Option<GlContext>> {
+    ) -> breadx::Result<Option<GlContext<Dpy>>> {
         let draw = draw.into();
         self.bind_internal(dpy, Some(draw), Some(draw))
     }
 
     #[cfg(feature = "async")]
     #[inline]
-    pub async fn bind_async<
-        Conn: Connection,
-        Dpy: AsRef<Display<Conn>> + AsMut<Display<Conn>> + Send,
-        Target: Into<Drawable>,
-    >(
+    pub async fn bind_async<Target: Into<Drawable>>(
         &self,
-        dpy: &mut GlDisplay<Conn, Dpy>,
+        dpy: &GlDisplay<Dpy>,
         draw: Target,
-    ) -> breadx::Result<Option<GlContext>> {
+    ) -> breadx::Result<Option<GlContext<Dpy>>> {
         let draw = draw.into();
         self.bind_internal_async(dpy, Some(draw), Some(draw)).await
     }
 }
 
+pub(crate) type AnyArc = Arc<dyn Any + Send + Sync + 'static>;
+
 /// A static memory location containing the currently active GlContext.
 /// GL calls are global (unfortunately). All GL calls should be made onto
 /// this context.
+/// Note: The inner context here is always an Arc<InnerGlContext<Conn, Dpy>> of some type. We confirm these
+/// generic parameters whenever we load or set the context. In any sane configuration we shouldn't end up
+/// with a downcasting error.
 /// TODO: there HAS to be a better way of doing this
-static CURRENT_CONTEXT: RwLock<Option<GlContext>> = {
-    #[cfg(feature = "async")]
-    {
-        RwLock::new(None)
-    }
+#[cfg(feature = "async")]
+static CURRENT_CONTEXT: async_lock::RwLock<Option<AnyArc>> = async_lock::RwLock::new(None);
+#[cfg(not(feature = "async"))]
+static CURRENT_CONTEXT: OnceCell<sync::RwLock<Option<AnyArc>>> = OnceCell::new();
 
-    #[cfg(not(feature = "async"))]
-    {
-        RwLock::const_new(RawRwLock::INIT, None)
-    }
-};
+#[cfg(not(feature = "async"))]
+const FAILED_READ: &str = "Failed to acquire read lock for current context";
+#[cfg(not(feature = "async"))]
+const FAILED_WRITE: &str = "Failed to acquire write lock for current context";
 
+#[cfg(not(feature = "async"))]
+fn current_context() -> &'static sync::RwLock<Option<AnyArc>> {
+    CURRENT_CONTEXT.get_or_init(|| sync::RwLock::new(None))
+}
+
+/// Try to promote an AnyArc to a GlContext.
 #[inline]
-pub(crate) fn get_current_context() -> RwLockReadGuard<'static, Option<GlContext>> {
-    cfg_if::cfg_if! {
-        if #[cfg(feature = "async")] {
-            async_io::block_on(get_current_context_async())
-        } else {
-            CURRENT_CONTEXT.read()
+pub(crate) fn promote_anyarc<Dpy: DisplayLike>(a: AnyArc) -> Option<GlContext<Dpy>> {
+    match Arc::downcast::<InnerGlContext<Dpy>>(a) {
+        Ok(inner) => Some(GlContext { inner }),
+        Err(_) => {
+            log::error!("Failed to promote GlContext.");
+            None
         }
     }
 }
 
 #[inline]
-pub(crate) fn set_current_context(ctx: GlContext) -> Option<GlContext> {
+pub(crate) fn promote_anyarc_ref<Dpy: DisplayLike>(a: &AnyArc) -> Option<&GlContext<Dpy>> {
+    if Any::is::<Arc<InnerGlContext<Dpy>>>(a) {
+        // SAFETY: GlContext is just a transparent wrapper around Arc<InnerGlContext>, so we can safely use
+        //         pointer transmutation once we're certain of its inner type
+        Some(unsafe { &*(a as *const AnyArc as *const GlContext<Dpy>) })
+    } else {
+        None
+    }
+}
+
+#[inline]
+pub(crate) fn get_current_context() -> RwLockReadGuard<'static, Option<AnyArc>> {
     cfg_if::cfg_if! {
         if #[cfg(feature = "async")] {
-            async_io::block_on(set_current_context_async(ctx))
+            future::block_on(get_current_context_async())
         } else {
-            let mut ctx = Some(ctx);
-            mem::swap(
-                &mut *CURRENT_CONTEXT.write(),
-                &mut ctx,
-            );
-            ctx
+            current_context().read().expect(FAILED_READ)
         }
     }
 }
 
 #[inline]
-pub(crate) fn take_current_context() -> Option<GlContext> {
+pub(crate) fn set_current_context<Dpy: DisplayLike>(ctx: GlContext<Dpy>) -> Option<AnyArc> {
     cfg_if::cfg_if! {
         if #[cfg(feature = "async")] {
-            async_io::block_on(take_current_context_async())
+            future::block_on(set_current_context_async(ctx))
         } else {
-            mem::take(&mut *CURRENT_CONTEXT.write())
+            mem::replace(
+                &mut *current_context().write().expect(FAILED_WRITE),
+                Some(ctx.inner),
+            )
+        }
+    }
+}
+
+#[inline]
+pub(crate) fn take_current_context() -> Option<AnyArc> {
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "async")] {
+            future::block_on(take_current_context_async())
+        } else {
+            mem::take(&mut *current_context().write().expect(FAILED_WRITE))
         }
     }
 }
 
 #[cfg(feature = "async")]
 #[inline]
-pub(crate) async fn get_current_context_async() -> RwLockReadGuard<'static, Option<GlContext>> {
+pub(crate) async fn get_current_context_async() -> RwLockReadGuard<'static, Option<AnyArc>> {
     CURRENT_CONTEXT.read().await
 }
 
 #[cfg(feature = "async")]
 #[inline]
-pub(crate) async fn set_current_context_async(ctx: GlContext) -> Option<GlContext> {
-    let mut ctx = Some(ctx);
-    mem::swap(&mut *CURRENT_CONTEXT.write().await, &mut ctx);
-    ctx
+pub(crate) async fn set_current_context_async<Dpy: DisplayLike>(
+    ctx: GlContext<Dpy>,
+) -> Option<AnyArc> {
+    mem::replace(&mut *CURRENT_CONTEXT.write().await, Some(ctx.inner))
 }
 
 #[cfg(feature = "async")]
 #[inline]
-pub(crate) async fn take_current_context_async() -> Option<GlContext> {
+pub(crate) async fn take_current_context_async() -> Option<AnyArc> {
     mem::take(&mut *CURRENT_CONTEXT.write().await)
 }
