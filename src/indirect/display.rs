@@ -8,7 +8,9 @@ use breadx::display::{Connection, Display};
 use std::{fmt, marker::PhantomData};
 
 #[cfg(feature = "async")]
-use crate::util::GenericFuture;
+use crate::{display::AsyncGlInternalDisplay, util::GenericFuture};
+#[cfg(feature = "async")]
+use breadx::display::AsyncConnection;
 
 pub struct IndirectDisplay<Dpy> {
     _private: PhantomData<Dpy>,
@@ -38,7 +40,10 @@ impl<Dpy: DisplayLike> IndirectDisplay<Dpy> {
     }
 }
 
-impl<Dpy: DisplayLike> GlInternalDisplay<Dpy> for IndirectDisplay<Dpy> {
+impl<Dpy: DisplayLike> GlInternalDisplay<Dpy> for IndirectDisplay<Dpy>
+where
+    Dpy::Conn: Connection,
+{
     #[inline]
     fn create_screen(
         &self,
@@ -47,8 +52,13 @@ impl<Dpy: DisplayLike> GlInternalDisplay<Dpy> for IndirectDisplay<Dpy> {
     ) -> breadx::Result<GlScreen<Dpy>> {
         unimplemented!()
     }
+}
 
-    #[cfg(feature = "async")]
+#[cfg(feature = "async")]
+impl<Dpy: DisplayLike> AsyncGlInternalDisplay<Dpy> for IndirectDisplay<Dpy>
+where
+    Dpy::Conn: AsyncConnection,
+{
     #[inline]
     fn create_screen_async<'future, 'a, 'b>(
         &'a self,

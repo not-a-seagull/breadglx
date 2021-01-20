@@ -15,12 +15,20 @@ use std::{
     ffi::c_void,
     os::raw::c_uint,
     ptr::{self, NonNull},
-    sync::{atomic::AtomicPtr, Arc},
+    sync::{
+        atomic::{AtomicPtr, AtomicUsize, Ordering},
+        Arc,
+    },
 };
 use tinyvec::ArrayVec;
 
 #[cfg(feature = "async")]
-use crate::util::GenericFuture;
+use crate::{context::AsyncGlInternalContext, util::GenericFuture};
+#[cfg(feature = "async")]
+use breadx::display::AsyncConnection;
+
+// it's useful to assign each context a context ID
+static CONTEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug)]
 struct Dri3ContextInner<Dpy> {
@@ -28,6 +36,7 @@ struct Dri3ContextInner<Dpy> {
     // Dri3Screen is wrapped in an Arc, we can keep a sneaky reference here
     screen: Dri3Screen<Dpy>,
     fbconfig: GlConfig,
+    context_id: usize,
 }
 
 #[derive(Debug)]
@@ -48,7 +57,7 @@ impl<Dpy> Clone for Dri3Context<Dpy> {
 unsafe impl<Dpy: Send> Send for Dri3Context<Dpy> {}
 unsafe impl<Dpy: Sync> Sync for Dri3Context<Dpy> {}
 
-impl<Dpy: DisplayLike> Dri3Context<Dpy> {
+impl<Dpy> Dri3Context<Dpy> {
     #[inline]
     fn new_internal(
         screen: Dri3Screen<Dpy>,
@@ -94,10 +103,59 @@ impl<Dpy: DisplayLike> Dri3Context<Dpy> {
                 ))?,
                 screen,
                 fbconfig,
+                context_id: CONTEXT_ID.fetch_add(Ordering::AcqRel),
             }),
         })
     }
 
+    #[inline]
+    pub fn is_current(&self) -> bool {
+        if let Some(ref curr) = GlContext::get() {
+            if let ContextDispatch::Dri3(d3) = curr.dispatch() {
+                return d3.dri_context() == self.dri_context();
+            }
+        }
+
+        false
+    }
+
+    #[inline]
+    pub async fn is_current_async(&self) -> bool {}
+
+    #[inline]
+    fn dri_context(&self) -> NonNull<ffi::__DRIcontext> {
+        self.inner.dri_context
+    }
+
+    #[inline]
+    fn screen(&self) -> &Dri3Screen<Dpy> {
+        &self.inner.screen
+    }
+
+    #[inline]
+    pub fn fbconfig(&self) -> Option<&GlConfig> {
+        Some(&self.inner.fbconfig)
+    }
+
+    #[inline]
+    pub fn context_id(&self) -> usize {
+        self.context_id
+    }
+
+    #[inline]
+    fn unbind_internal(&self) {
+        unsafe {
+            ((*self.screen().inner.core)
+                .unbindContext
+                .expect("unbindContext not present"))(self.dri_context().as_ptr())
+        };
+    }
+}
+
+impl<Dpy: DisplayLike> Dri3Context<Dpy>
+where
+    Dpy::Conn: Connection,
+{
     #[inline]
     pub(crate) fn new(
         scr: &Dri3Screen<Dpy>,
@@ -108,8 +166,13 @@ impl<Dpy: DisplayLike> Dri3Context<Dpy> {
     ) -> breadx::Result<Dri3Context<Dpy>> {
         Self::new_internal(scr.clone(), fbconfig.clone(), rules, share, base)
     }
+}
 
-    #[cfg(feature = "async")]
+#[cfg(feature = "async")]
+impl<Dpy: DisplayLike> Dri3Context<Dpy>
+where
+    Dpy::Conn: AsyncConnection + Send,
+{
     #[inline]
     pub(crate) async fn new_async(
         scr: &Dri3Screen<Dpy>,
@@ -127,29 +190,12 @@ impl<Dpy: DisplayLike> Dri3Context<Dpy> {
         blocking::unblock(move || Self::new_internal(scr, fbconfig, &rules, share.as_ref(), &base))
             .await
     }
-
-    #[inline]
-    fn dri_context(&self) -> NonNull<ffi::__DRIcontext> {
-        self.inner.dri_context
-    }
-
-    #[inline]
-    fn screen(&self) -> &Dri3Screen<Dpy> {
-        &self.inner.screen
-    }
-
-    #[inline]
-    pub fn fbconfig(&self) -> Option<&GlConfig> {
-        Some(&self.inner.fbconfig)
-    }
 }
 
-impl<Dpy: DisplayLike> GlInternalContext<Dpy> for Dri3Context<Dpy> {
-    #[inline]
-    fn is_direct(&self) -> bool {
-        true
-    }
-
+impl<Dpy: DisplayLike> GlInternalContext<Dpy> for Dri3Context<Dpy>
+where
+    Dpy::Conn: Connection,
+{
     #[inline]
     fn bind(
         &self,
@@ -205,7 +251,18 @@ impl<Dpy: DisplayLike> GlInternalContext<Dpy> for Dri3Context<Dpy> {
         }
     }
 
-    #[cfg(feature = "async")]
+    #[inline]
+    fn unbind(&self) -> breadx::Result<()> {
+        self.unbind_internal();
+        Ok(())
+    }
+}
+
+#[cfg(feature = "async")]
+impl<Dpy: DisplayLike> AsyncGlInternalContext<Dpy> for Dri3Context<Dpy>
+where
+    Dpy::Conn: AsyncConnection + Send,
+{
     #[inline]
     fn bind_async<'future, 'a, 'b>(
         &'a self,
@@ -267,7 +324,7 @@ impl<Dpy: DisplayLike> GlInternalContext<Dpy> for Dri3Context<Dpy> {
 
                 if let Some(read) = read {
                     if let Some(draw) = draw {
-                        if Arc::ptr_eq(&read, &draw) {
+                        if !Arc::ptr_eq(&read, &draw) {
                             Dri3Drawable::invalidate_async(read).await;
                         }
                     } else {
@@ -280,21 +337,11 @@ impl<Dpy: DisplayLike> GlInternalContext<Dpy> for Dri3Context<Dpy> {
         })
     }
 
-    #[inline]
-    fn unbind(&self) -> breadx::Result<()> {
-        unsafe {
-            ((*self.screen().inner.core)
-                .unbindContext
-                .expect("unbindContext not present"))(self.dri_context().as_ptr())
-        };
-        Ok(())
-    }
-
     #[cfg(feature = "async")]
     #[inline]
     fn unbind_async<'future>(&'future self) -> GenericFuture<'future, breadx::Result> {
         let this = self.clone();
-        Box::pin(blocking::unblock(move || this.unbind()))
+        Box::pin(blocking::unblock(move || this.unbind_internal()))
     }
 }
 

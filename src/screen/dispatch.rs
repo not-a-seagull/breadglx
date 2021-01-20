@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
+#[cfg(feature = "async")]
+use breadx::display::AsyncConnection;
 
 #[derive(Debug)]
 pub(crate) enum ScreenDispatch<Dpy> {
@@ -45,7 +47,10 @@ impl<Dpy> From<dri3::Dri3Screen<Dpy>> for ScreenDispatch<Dpy> {
     }
 }
 
-impl<Dpy: DisplayLike> GlInternalScreen<Dpy> for ScreenDispatch<Dpy> {
+impl<Dpy: DisplayLike> GlInternalScreen<Dpy> for ScreenDispatch<Dpy>
+where
+    Dpy::Conn: Connection,
+{
     #[inline]
     fn create_context(
         &self,
@@ -62,8 +67,13 @@ impl<Dpy: DisplayLike> GlInternalScreen<Dpy> for ScreenDispatch<Dpy> {
             Self::Dri3(d3) => d3.create_context(base, fbconfig, rules, share),
         }
     }
+}
 
-    #[cfg(feature = "async")]
+#[cfg(feature = "async")]
+impl<Dpy: DisplayLike> AsyncGlInternalScreen<Dpy> for ScreenDispatch<Dpy>
+where
+    Dpy::Conn: AsyncConnection,
+{
     #[inline]
     fn create_context_async<'future, 'a, 'b, 'c, 'd, 'e>(
         &'a self,
@@ -79,14 +89,12 @@ impl<Dpy: DisplayLike> GlInternalScreen<Dpy> for ScreenDispatch<Dpy> {
         'd: 'future,
         'e: 'future,
     {
-        Box::pin(async move {
-            match self {
-                Self::Indirect(is) => is.create_context_async(base, fbconfig, rules, share).await,
-                #[cfg(feature = "dri")]
-                Self::Dri2(d2) => d2.create_context_async(base, fbconfig, rules, share).await,
-                #[cfg(feature = "dri3")]
-                Self::Dri3(d3) => d3.create_context_async(base, fbconfig, rules, share).await,
-            }
-        })
+        match self {
+            Self::Indirect(is) => is.create_context_async(base, fbconfig, rules, share),
+            #[cfg(feature = "dri")]
+            Self::Dri2(d2) => d2.create_context_async(base, fbconfig, rules, share),
+            #[cfg(feature = "dri3")]
+            Self::Dri3(d3) => d3.create_context_async(base, fbconfig, rules, share),
+        }
     }
 }

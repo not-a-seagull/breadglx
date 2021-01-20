@@ -20,7 +20,7 @@ use std::{
     hash::{Hash, Hasher},
     os::raw::c_int,
     ptr::{self, NonNull},
-    sync::Arc,
+    sync::{Arc, Weak},
 };
 
 #[cfg(feature = "async")]
@@ -32,11 +32,35 @@ pub struct Dri3Screen<Dpy> {
     pub(crate) inner: Arc<Dri3ScreenInner<Dpy>>,
 }
 
+#[repr(transparent)]
+#[derive(Debug)]
+pub struct WeakDri3ScreenRef<Dpy> {
+    pub(crate) inner: Weak<Dri3ScreenInner<Dpy>>,
+}
+
 impl<Dpy> Clone for Dri3Screen<Dpy> {
     #[inline]
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<Dpy> Clone for WeakDri3ScreenRef<Dpy> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<Dpy> WeakDri3ScreenRef<Dpy> {
+    #[inline]
+    pub fn promote(&self) -> Dri3Screen<Dpy> {
+        Dri3Screen {
+            inner: self.inner.upgrade().expect("Failed to promote Dri3 screen"),
         }
     }
 }
@@ -140,7 +164,7 @@ impl<Dpy: DisplayLike> Dri3ScreenInner<Dpy> {
             ((*self.image_driver).createNewScreen2.unwrap())(
                 scr as _,
                 fd,
-                super::LOADER_EXTENSIONS.as_ptr() as *mut _,
+                super::loader_extensions::<Dpy>().as_ptr() as *mut _,
                 extensions.as_mut_ptr() as *mut *const ffi::__DRIextension,
                 &mut driver_configs,
                 // while this could cause undefined behavior, the places where this is used (loader extensions)
@@ -217,6 +241,13 @@ impl<Dpy: DisplayLike> Dri3Screen<Dpy> {
     #[inline]
     pub fn dri_screen(&self) -> NonNull<ffi::__DRIscreen> {
         self.inner.dri_screen.expect("Failed to load DRI screen")
+    }
+
+    #[inline]
+    pub fn weak_ref(&self) -> WeakDri3ScreenRef<Dpy> {
+        WeakDri3ScreenRef {
+            inner: self.inner.downgrade(),
+        }
     }
 
     #[inline]
@@ -440,13 +471,8 @@ impl<Dpy: DisplayLike> Dri3Screen<Dpy> {
                         })
                         .ok_or(breadx::BreadError::StaticMsg("Failed to find FbConfig ID"))?,
                 };
-                let d = Dri3Drawable::new_async(
-                    &dpy,
-                    drawable,
-                    self.clone(),
-                    fbconfig.clone(),
-                )
-                .await?;
+                let d =
+                    Dri3Drawable::new_async(&dpy, drawable, self.clone(), fbconfig.clone()).await?;
                 self.inner.drawable_map.insert(drawable, d.clone());
                 Ok(d)
             }

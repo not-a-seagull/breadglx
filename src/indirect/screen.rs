@@ -6,17 +6,23 @@ use crate::{
     display::DisplayLike,
     screen::GlInternalScreen,
 };
+use breadx::display::Connection;
 use std::{marker::PhantomData, sync::Arc};
 
 #[cfg(feature = "async")]
-use crate::util::GenericFuture;
+use crate::{screen::AsyncGlInternalScreen, util::GenericFuture};
+#[cfg(feature = "async")]
+use breadx::display::AsyncConnection;
 
 #[derive(Debug)]
 pub struct IndirectScreen<Dpy> {
     p: PhantomData<Dpy>,
 }
 
-impl<Dpy: DisplayLike> GlInternalScreen<Dpy> for IndirectScreen<Dpy> {
+impl<Dpy: DisplayLike> GlInternalScreen<Dpy> for IndirectScreen<Dpy>
+where
+    Dpy::Conn: Connection,
+{
     #[inline]
     fn create_context(
         &self,
@@ -27,8 +33,13 @@ impl<Dpy: DisplayLike> GlInternalScreen<Dpy> for IndirectScreen<Dpy> {
     ) -> breadx::Result<ContextDispatch<Dpy>> {
         unimplemented!()
     }
+}
 
-    #[cfg(feature = "async")]
+#[cfg(feature = "async")]
+impl<Dpy: DisplayLike> AsyncGlInternalScreen<Dpy> for IndirectScreen<Dpy>
+where
+    Dpy::Conn: AsyncConnection,
+{
     #[inline]
     fn create_context_async<'future, 'a, 'b, 'c, 'd, 'e>(
         &'a self,

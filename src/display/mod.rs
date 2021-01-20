@@ -19,11 +19,14 @@ use std::sync;
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
 #[cfg(feature = "async")]
+use breadx::display::AsyncConnection;
+#[cfg(feature = "async")]
 use futures_lite::future;
 
 mod dispatch;
 
-/// Things that can go inside of a GlDisplay.
+/// Things that can go inside of a GlDisplay. Since it is shoved into a static variable
+/// at one point, it needs to be Send + Sync + 'static.
 pub trait DisplayLike = DpyLikeBase + Send + Sync + 'static;
 
 // We stuff this inside of a GlDisplay.
@@ -77,6 +80,7 @@ impl<'a, Dpy: DisplayLike> DerefMut for DisplayLock<'a, Dpy> {
 impl<'a, Dpy> Drop for DisplayLock<'a, Dpy> {
     #[inline]
     fn drop(&mut self) {
+        #[cfg(debug_assertions)]
         log::trace!("Dropping display lock...");
     }
 }
@@ -97,15 +101,16 @@ impl<Dpy> Clone for GlDisplay<Dpy> {
     }
 }
 
-/// The underlying OpenGL context.
 pub(crate) trait GlInternalDisplay<Dpy: DisplayLike> {
     fn create_screen(
         &self,
         dpy: &mut Display<Dpy::Conn>,
         index: usize,
     ) -> breadx::Result<GlScreen<Dpy>>;
+}
 
-    #[cfg(feature = "async")]
+#[cfg(feature = "async")]
+pub(crate) trait AsyncGlInternalDisplay<Dpy: DisplayLike> {
     fn create_screen_async<'future, 'a, 'b>(
         &'a self,
         dpy: &'b mut Display<Dpy::Conn>,
@@ -120,6 +125,7 @@ impl<Dpy: DisplayLike> GlDisplay<Dpy> {
     /// Lock the mutex containing the internal display.
     #[inline]
     pub fn display(&self) -> DisplayLock<'_, Dpy> {
+        #[cfg(debug_assertions)]
         log::trace!("Creating display lock...");
 
         #[cfg(not(feature = "async"))]
@@ -138,13 +144,16 @@ impl<Dpy: DisplayLike> GlDisplay<Dpy> {
     #[cfg(feature = "async")]
     #[inline]
     pub async fn display_async(&self) -> DisplayLock<'_, Dpy> {
+        #[cfg(debug_assertions)]
+        log::trace!("Creating display lock...");
+
         DisplayLock {
             base: self.inner.display.lock().await,
         }
     }
 }
 
-pub(crate) struct GlStats {
+struct GlStats {
     direct: bool,
     accel: bool,
     no_dri3: bool,
@@ -163,7 +172,10 @@ impl GlStats {
     }
 }
 
-impl<Dpy: DisplayLike> GlDisplay<Dpy> {
+impl<Dpy: DisplayLike> GlDisplay<Dpy>
+where
+    Dpy::Conn: Connection,
+{
     #[inline]
     pub fn create_screen(&self, screen: usize) -> breadx::Result<GlScreen<Dpy>> {
         log::trace!("Creating screen...");
@@ -256,8 +268,11 @@ impl<Dpy: DisplayLike> GlDisplay<Dpy> {
     }
 }
 
-impl<Dpy: DisplayLike> GlDisplay<Dpy> {
-    #[cfg(feature = "async")]
+#[cfg(feature = "async")]
+impl<Dpy: DisplayLike> GlDisplay<Dpy>
+where
+    Dpy::Conn: AsyncConnection + Send,
+{
     #[inline]
     pub async fn create_screen_async(&mut self, index: usize) -> breadx::Result<GlScreen<Dpy>> {
         self.inner
@@ -267,7 +282,6 @@ impl<Dpy: DisplayLike> GlDisplay<Dpy> {
     }
 
     /// Load a drawable's property, async redox.
-    #[cfg(feature = "async")]
     #[inline]
     pub(crate) async fn load_drawable_property_async(
         &self,
@@ -314,7 +328,6 @@ impl<Dpy: DisplayLike> GlDisplay<Dpy> {
         Ok(map.get(&property).copied())
     }
 
-    #[cfg(feature = "async")]
     #[inline]
     pub async fn new_async(mut dpy: Dpy) -> breadx::Result<Self> {
         // create the basic display
@@ -355,9 +368,6 @@ impl<Dpy: DisplayLike> GlDisplay<Dpy> {
         };
 
         let this = InnerGlDisplay {
-            #[cfg(not(feature = "async"))]
-            display: sync::Mutex::new(dpy),
-            #[cfg(feature = "async")]
             display: async_lock::Mutex::new(dpy),
             direct: stats.direct,
             accel: stats.accel,

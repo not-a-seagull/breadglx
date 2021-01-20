@@ -33,7 +33,7 @@ pub struct GlScreen<Dpy> {
     visuals: Arc<[GlConfig]>,
 }
 
-pub(crate) trait GlInternalScreen<Dpy: DisplayLike> {
+pub(crate) trait GlInternalScreen<Dpy> {
     /// Create a new gl context for this screen.
     fn create_context(
         &self,
@@ -42,7 +42,9 @@ pub(crate) trait GlInternalScreen<Dpy: DisplayLike> {
         rules: &[GlContextRule],
         share: Option<&GlContext<Dpy>>,
     ) -> breadx::Result<ContextDispatch<Dpy>>;
+}
 
+pub(crate) trait AsyncGlInternalScreen<Dpy> {
     /// Async redox
     #[cfg(feature = "async")]
     fn create_context_async<'future, 'a, 'b, 'c, 'd, 'e>(
@@ -57,11 +59,10 @@ pub(crate) trait GlInternalScreen<Dpy: DisplayLike> {
         'b: 'future,
         'c: 'future,
         'd: 'future,
-        'e: 'future,
-        Dpy: Send;
+        'e: 'future;
 }
 
-impl<Dpy: DisplayLike> GlScreen<Dpy> {
+impl<Dpy> GlScreen<Dpy> {
     #[inline]
     pub fn screen_index(&self) -> usize {
         self.screen
@@ -129,7 +130,12 @@ impl<Dpy: DisplayLike> GlScreen<Dpy> {
             .cloned()
             .collect()
     }
+}
 
+impl<Dpy: DisplayLike> GlScreen<Dpy>
+where
+    Dpy::Conn: Connection,
+{
     /// Create an OpenGL context.
     #[inline]
     pub fn create_context(
@@ -174,9 +180,12 @@ impl<Dpy: DisplayLike> GlScreen<Dpy> {
     }
 }
 
-impl<Dpy: DisplayLike> GlScreen<Dpy> {
+#[cfg(feature = "async")]
+impl<Dpy: DisplayLike> GlScreen<Dpy>
+where
+    Dpy::Conn: AsyncConnection + Send,
+{
     /// Create an OpenGL context, async redox.
-    #[cfg(feature = "async")]
     #[inline]
     pub async fn create_context_async(
         &self,

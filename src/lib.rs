@@ -15,6 +15,9 @@ pub(crate) mod indirect;
 pub(crate) mod mesa;
 pub(crate) mod util;
 
+#[cfg(feature = "async")]
+pub(crate) mod offload;
+
 pub mod config;
 pub mod context;
 pub mod display;

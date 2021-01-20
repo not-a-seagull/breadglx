@@ -84,9 +84,14 @@ const GL_LIB_NAMES: [&str; 2] = ["libGL.so", "libGL.so.1"];
 
 const DRM_LIB_NAMES: [&str; 2] = ["libdrm.so", "libdrm.so.2"];
 
+const XSHMFENCE_LIB_NAMES: [&str; 2] = ["libxshmfence.so", "libxshmfence.so.1"];
+
 static GL: Lazy<breadx::Result<Dll>> = Lazy::new(|| Dll::load("LibGL", &GL_LIB_NAMES));
 
 static DRM: Lazy<breadx::Result<Dll>> = Lazy::new(|| Dll::load("LibDRM", &DRM_LIB_NAMES));
+
+static XSHMFENCE: Lazy<breadx::Result<Dll>> =
+    Lazy::new(|| Dll::load("LibXShmFence", &XSHMFENCE_LIB_NAMES));
 
 #[inline]
 fn unwrap_result(res: &breadx::Result<Dll>) -> breadx::Result<&Dll> {
@@ -134,4 +139,23 @@ pub(crate) fn drm() -> breadx::Result<&'static Dll> {
 #[inline]
 pub(crate) async fn drm_async() -> breadx::Result<&'static Dll> {
     unwrap_result(DRM.get().await)
+}
+
+#[inline]
+pub(crate) fn xshmfence() -> breadx::Result<&'static Dll> {
+    #[cfg(feature = "async")]
+    {
+        future::block_on(xshmfence_async())
+    }
+    #[cfg(not(feature = "async"))]
+    {
+        let res = &*XSHMFENCE;
+        unwrap_result(res)
+    }
+}
+
+#[cfg(feature = "async")]
+#[inline]
+pub(crate) async fn xshmfence_async() -> breadx::Result<&'static Dll> {
+    unwrap_result(XSHMFENCE.get().await)
 }

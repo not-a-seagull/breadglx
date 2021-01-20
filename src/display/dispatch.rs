@@ -12,6 +12,8 @@ use breadx::{Connection, Display};
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
 #[cfg(feature = "async")]
+use breadx::display::AsyncConnection;
+#[cfg(feature = "async")]
 use std::boxed::Box;
 
 /// Dispatch for contexts.
@@ -47,7 +49,10 @@ impl<Dpy> From<dri3::Dri3Display<Dpy>> for DisplayDispatch<Dpy> {
     }
 }
 
-impl<Dpy: DisplayLike> super::GlInternalDisplay<Dpy> for DisplayDispatch<Dpy> {
+impl<Dpy: DisplayLike> super::GlInternalDisplay<Dpy> for DisplayDispatch<Dpy>
+where
+    Dpy::Conn: Connection,
+{
     #[inline]
     fn create_screen(
         &self,
@@ -62,8 +67,13 @@ impl<Dpy: DisplayLike> super::GlInternalDisplay<Dpy> for DisplayDispatch<Dpy> {
             Self::Dri3(d3) => d3.create_screen(dpy, index),
         }
     }
+}
 
-    #[cfg(feature = "async")]
+#[cfg(feature = "async")]
+impl<Dpy: DisplayLike> super::AsyncGlInternalDisplay<Dpy> for DisplayDispatch<Dpy>
+where
+    Dpy::Conn: AsyncConnection,
+{
     #[inline]
     fn create_screen_async<'future, 'a, 'b>(
         &'a self,
@@ -74,14 +84,12 @@ impl<Dpy: DisplayLike> super::GlInternalDisplay<Dpy> for DisplayDispatch<Dpy> {
         'a: 'future,
         'b: 'future,
     {
-        Box::pin(async move {
-            match self {
-                Self::Indirect(i) => i.create_screen_async(dpy, index).await,
-                #[cfg(feature = "dri")]
-                Self::Dri2(d2) => d2.create_screen_async(dpy, index).await,
-                #[cfg(feature = "dri3")]
-                Self::Dri3(d3) => d3.create_screen_async(dpy, index).await,
-            }
-        })
+        match self {
+            Self::Indirect(i) => i.create_screen_async(dpy, index),
+            #[cfg(feature = "dri")]
+            Self::Dri2(d2) => d2.create_screen_async(dpy, index),
+            #[cfg(feature = "dri3")]
+            Self::Dri3(d3) => d3.create_screen_async(dpy, index),
+        }
     }
 }

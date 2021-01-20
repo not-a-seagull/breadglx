@@ -13,6 +13,8 @@ use breadx::{
 
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
+#[cfg(feature = "async")]
+use breadx::display::AsyncConnection;
 
 pub enum ContextDispatch<Dpy> {
     Indirect(indirect::IndirectContext<Dpy>),
@@ -46,9 +48,9 @@ impl<Dpy> From<dri3::Dri3Context<Dpy>> for ContextDispatch<Dpy> {
     }
 }
 
-impl<Dpy: DisplayLike> GlInternalContext<Dpy> for ContextDispatch<Dpy> {
+impl<Dpy> ContextDispatch<Dpy> {
     #[inline]
-    fn is_direct(&self) -> bool {
+    pub fn is_direct(&self) -> bool {
         match self {
             Self::Placeholder => unreachable!("Invalid placeholder"),
             Self::Indirect(_) => false,
@@ -58,7 +60,12 @@ impl<Dpy: DisplayLike> GlInternalContext<Dpy> for ContextDispatch<Dpy> {
             Self::Dri3(d3) => true,
         }
     }
+}
 
+impl<Dpy: DisplayLike> GlInternalContext<Dpy> for ContextDispatch<Dpy>
+where
+    Dpy::Conn: Connection,
+{
     #[inline]
     fn bind(
         &self,
@@ -76,30 +83,6 @@ impl<Dpy: DisplayLike> GlInternalContext<Dpy> for ContextDispatch<Dpy> {
         }
     }
 
-    #[cfg(feature = "async")]
-    #[inline]
-    fn bind_async<'future, 'a, 'b>(
-        &'a self,
-        dpy: &'b GlDisplay<Dpy>,
-        read: Option<Drawable>,
-        draw: Option<Drawable>,
-    ) -> GenericFuture<'future, breadx::Result<()>>
-    where
-        'a: 'future,
-        'b: 'future,
-    {
-        Box::pin(async move {
-            match self {
-                Self::Placeholder => unreachable!("Invalid placeholder"),
-                Self::Indirect(i) => i.bind_async(dpy, read, draw).await,
-                #[cfg(feature = "dri")]
-                Self::Dri2(d2) => d2.bind_async(dpy, read, draw).await,
-                #[cfg(feature = "dri3")]
-                Self::Dri3(d3) => d3.bind_async(dpy, read, draw).await,
-            }
-        })
-    }
-
     #[inline]
     fn unbind(&self) -> breadx::Result<()> {
         match self {
@@ -111,19 +94,44 @@ impl<Dpy: DisplayLike> GlInternalContext<Dpy> for ContextDispatch<Dpy> {
             Self::Dri3(d3) => d3.unbind(),
         }
     }
+}
+
+#[cfg(feature = "async")]
+impl<Dpy: DisplayLike> AsyncGlInternalContext<Dpy> for ContextDispatch<Dpy>
+where
+    Dpy::Conn: AsyncConnection,
+{
+    #[inline]
+    fn bind_async<'future, 'a, 'b>(
+        &'a self,
+        dpy: &'b GlDisplay<Dpy>,
+        read: Option<Drawable>,
+        draw: Option<Drawable>,
+    ) -> GenericFuture<'future, breadx::Result<()>>
+    where
+        'a: 'future,
+        'b: 'future,
+    {
+        match self {
+            Self::Placeholder => unreachable!("Invalid placeholder"),
+            Self::Indirect(i) => Box::pin(i.bind_async(dpy, read, draw)),
+            #[cfg(feature = "dri")]
+            Self::Dri2(d2) => Box::pin(d2.bind_async(dpy, read, draw)),
+            #[cfg(feature = "dri3")]
+            Self::Dri3(d3) => Box::pin(d3.bind_async(dpy, read, draw)),
+        }
+    }
 
     #[cfg(feature = "async")]
     #[inline]
     fn unbind_async<'future>(&'future self) -> GenericFuture<'future, breadx::Result<()>> {
-        Box::pin(async move {
-            match self {
-                Self::Placeholder => unreachable!("Invalid placeholder"),
-                Self::Indirect(i) => i.unbind_async().await,
-                #[cfg(feature = "dri")]
-                Self::Dri2(d2) => d2.unbind_async().await,
-                #[cfg(feature = "dri3")]
-                Self::Dri3(d3) => d3.unbind_async().await,
-            }
-        })
+        match self {
+            Self::Placeholder => unreachable!("Invalid placeholder"),
+            Self::Indirect(i) => i.unbind_async(),
+            #[cfg(feature = "dri")]
+            Self::Dri2(d2) => d2.unbind_async(),
+            #[cfg(feature = "dri3")]
+            Self::Dri3(d3) => d3.unbind_async(),
+        }
     }
 }

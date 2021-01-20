@@ -105,6 +105,8 @@ fn main() -> Result<()> {
         }
     };
 
+    println!("Outside FFI: {:?}", std::thread::current().id());
+
     context.bind(&mut conn, win)?;
 
     Ok(())

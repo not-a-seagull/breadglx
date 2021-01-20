@@ -10,18 +10,18 @@ use breadx::{
 };
 
 #[cfg(feature = "async")]
-use crate::util::GenericFuture;
+use crate::{context::AsyncGlInternalContext, util::GenericFuture};
+#[cfg(feature = "async")]
+use breadx::display::AsyncConnection;
 
 pub struct Dri2Context<Dpy> {
     p: Dpy,
 }
 
-impl<Dpy: DisplayLike> GlInternalContext<Dpy> for Dri2Context<Dpy> {
-    #[inline]
-    fn is_direct(&self) -> bool {
-        true
-    }
-
+impl<Dpy: DisplayLike> GlInternalContext<Dpy> for Dri2Context<Dpy>
+where
+    Dpy::Conn: Connection,
+{
     #[inline]
     fn bind(
         &self,
@@ -32,7 +32,17 @@ impl<Dpy: DisplayLike> GlInternalContext<Dpy> for Dri2Context<Dpy> {
         unimplemented!()
     }
 
-    #[cfg(feature = "async")]
+    #[inline]
+    fn unbind(&self) -> breadx::Result {
+        unimplemented!()
+    }
+}
+
+#[cfg(feature = "async")]
+impl<Dpy: DisplayLike> AsyncGlInternalContext<Dpy> for Dri3Context<Dpy>
+where
+    Dpy::Conn: AsyncConnection + Send,
+{
     #[inline]
     fn bind_async<'future, 'a, 'b>(
         &'a self,
@@ -47,12 +57,6 @@ impl<Dpy: DisplayLike> GlInternalContext<Dpy> for Dri2Context<Dpy> {
         Box::pin(async { unimplemented!() })
     }
 
-    #[inline]
-    fn unbind(&self) -> breadx::Result {
-        unimplemented!()
-    }
-
-    #[cfg(feature = "async")]
     #[inline]
     fn unbind_async<'future>(&'future self) -> GenericFuture<'future, breadx::Result> {
         Box::pin(async { unimplemented!() })
