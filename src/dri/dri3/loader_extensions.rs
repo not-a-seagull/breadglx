@@ -101,7 +101,7 @@ where
             abort()
         }
         Ok(Err(e)) => {
-            log::error!("get_buffers resolved to error: {}", e);
+            log::error!("get_buffers resolved to error: {:?}", e);
             0
         }
         Ok(Ok(res)) => res,

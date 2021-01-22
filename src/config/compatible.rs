@@ -10,7 +10,6 @@ impl GlConfig {
         macro_rules! rmatch {
             ($a: expr, $b: expr, $fname: ident) => {
                 if ($a).$fname != DONT_CARE as _ && ($a).$fname != ($b).$fname {
-                    log::trace!("Config failed on {}", stringify!($fname));
                     return false;
                 }
             };
@@ -25,7 +24,6 @@ impl GlConfig {
         macro_rules! rmatch_lt {
             ($a: expr, $b: expr, $fname: ident) => {
                 if ($a).$fname != DONT_CARE as _ && ($a).$fname > ($b).$fname {
-                    log::trace!("Config failed on {}", stringify!($fname));
                     return false;
                 }
             };
@@ -40,7 +38,6 @@ impl GlConfig {
         macro_rules! rmatch_mask {
             ($a: expr, $b: expr, $fname: ident) => {
                 if ($a).$fname != DONT_CARE as _ && (($a).$fname & ($b).$fname) == 0 {
-                    log::trace!("Config failed on {}", stringify!($fname));
                     return false;
                 }
             };
@@ -55,7 +52,6 @@ impl GlConfig {
         macro_rules! rmatch_exact {
             ($a: expr, $b: expr, $fname: ident) => {
                 if ($a).$fname != ($b).$fname {
-                    log::trace!("Config failed on {}", stringify!($fname));
                     return false;
                 }
             };

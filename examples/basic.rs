@@ -24,6 +24,7 @@ fn main() -> Result<()> {
     let extinfo = conn
         .display()
         .query_extension_immediate("GLX".to_string())?;
+    println!("Glx Extension: {:?}", &extinfo);
 
     // find the ideal framebuffer config for our use
     const FBCONFIG_RULES: &[GlConfigRule] = &[

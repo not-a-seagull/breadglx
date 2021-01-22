@@ -763,6 +763,8 @@ where
     where
         'a: 'b,
     {
+        log::trace!("Entering scope for find_back");
+
         if self.process_present_events(&mut *conn, state.as_mut().unwrap())? {
             self.invalidate();
         }
@@ -858,6 +860,7 @@ where
     /// Free all buffers of an associated type.
     #[inline]
     pub fn free_buffers(&self, buffer_type: BufferType) -> breadx::Result<()> {
+        log::trace!("Entering scope for free_buffers");
         let mut state = self.state();
         let (first_id, n_ids) = match buffer_type {
             BufferType::Back => {
@@ -887,6 +890,7 @@ where
     /// Free unneeded back buffers.
     #[inline]
     pub fn free_back_buffers(&self) -> breadx::Result {
+        log::trace!("Entering scope for free_back_buffers");
         let mut state = self.state();
         for id in state.cur_num_back..MAX_BACK {
             if id as i32 != state.cur_blit_source && state.buffers[id].is_some() {
@@ -914,14 +918,15 @@ where
         buffer_type: BufferType,
         format: c_uint,
     ) -> breadx::Result<Arc<Dri3Buffer>> {
+        log::trace!("Entering scope for get_buffer");
+
         let buf_id = self.buffer_id(buffer_type)?;
 
         // see if there is a buffer; if there isn't a buffer (or if there is, but it's wrong),
         // rellocate it
         let width = self.width.load(Ordering::SeqCst);
         let height = self.height.load(Ordering::SeqCst);
-        let mut state = Some(self.state());
-        let mut conn = self.display.display();
+        let mut state: Option<MutexGuard<'a, DrawableState>> = Some(self.state());
         let mut fence_await = false;
 
         let mut create_new_buffer = move |state: &mut Option<MutexGuard<'a, DrawableState>>| -> breadx::Result<Arc<Dri3Buffer>> {
@@ -933,6 +938,9 @@ where
                 height,
                 self.depth.load(Ordering::SeqCst),
             )?;
+
+            let mut conn = self.display.display();
+            *state = Some(self.state());
 
             let buffer = state.as_mut().unwrap().buffers[buf_id].take();
             if buffer.is_some()
@@ -1017,14 +1025,18 @@ where
             Ok(new_buffer)
         };
 
-        let buffer = match state.as_ref().unwrap().buffers[buf_id] {
+        let buffer = match state.take().unwrap().buffers[buf_id] {
             None => create_new_buffer(&mut state)?,
             Some(ref buffer)
                 if buffer.reallocate || buffer.width != width || buffer.height != height =>
             {
                 create_new_buffer(&mut state)?
             }
-            Some(ref buffer) => buffer.clone(),
+            Some(ref buffer) => {
+                let res = buffer.clone();
+                state = Some(self.state());
+                res
+            }
         };
 
         if fence_await {
@@ -1080,6 +1092,8 @@ where
         buffer_type: BufferType,
         format: c_uint,
     ) -> breadx::Result<Arc<Dri3Buffer>> {
+        log::trace!("Entering scope for get_pixmap_buffer");
+
         let buf_id = self.buffer_id(buffer_type)?;
         if let Some(buffer) = self.state().buffers[buf_id].as_ref().cloned() {
             return Ok(buffer);
@@ -1210,17 +1224,20 @@ where
     /// Update this drawable.
     #[inline]
     pub fn update(&self) -> breadx::Result {
+        log::trace!("Entering scope for update");
+
         let mut guard = self.state();
 
         // acquire a lock on the display
         let mut conn = self.display.display();
 
         if !self.is_initialized.load(Ordering::Acquire) {
+            log::trace!("Initializing drawable");
             self.is_initialized.store(true, Ordering::Release);
 
             // activate checked mode if we haven't already
-            let old_checked = conn.checked();
-            conn.set_checked(true);
+//            let old_checked = conn.checked();
+//            conn.set_checked(true);
 
             // now that we have a lock, create an EID that represents the
             // special event selection
@@ -1255,6 +1272,7 @@ where
 
             // match the error on the geometry and select input results, if they are
             // BadWindow, this is a pixmap
+            log::trace!("Resolving geometry");
             let geometry = conn.resolve_request(geometry_tok)?;
 
             self.present_capabilities.store(
@@ -1277,7 +1295,7 @@ where
             self.width.store(geometry.width, Ordering::Relaxed);
             self.height.store(geometry.height, Ordering::Relaxed);
 
-            conn.set_checked(old_checked);
+//            conn.set_checked(old_checked);
         }
 
         if self.process_present_events(&mut conn, &mut guard)? {
@@ -1289,6 +1307,7 @@ where
 
     #[inline]
     pub fn update_max_back(&self) {
+        log::trace!("Entering scope for update_max_back");
         let mut state = self.state();
 
         let swap_interval = self.swap_interval.load(Ordering::Acquire);

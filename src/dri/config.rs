@@ -116,12 +116,6 @@ fn config_seg_equal(config: &GlConfig, attrib: c_uint, value: c_uint) -> bool {
         };
 
         let res = config.render_type == equivalent;
-        if !res {
-            log::trace!(
-                "Config of ID {} failed on __DRI_ATTRIB_RENDER_TYPE",
-                config.fbconfig_id
-            );
-        }
         res
     } else if attrib == ffi::__DRI_ATTRIB_CONFIG_CAVEAT {
         let equivalent = if value & ffi::__DRI_ATTRIB_NON_CONFORMANT_CONFIG != 0 {
@@ -133,12 +127,6 @@ fn config_seg_equal(config: &GlConfig, attrib: c_uint, value: c_uint) -> bool {
         };
 
         let res = config.visual_rating == equivalent;
-        if !res {
-            log::trace!(
-                "Config of ID {:X} failed on __DRI_ATTRIB_CONFIG_CAVEAT",
-                config.fbconfig_id
-            );
-        }
         res
     } else if attrib == ffi::__DRI_ATTRIB_BIND_TO_TEXTURE_TARGETS {
         let equivalent = if value & ffi::__DRI_ATTRIB_TEXTURE_1D_BIT != 0 {
@@ -157,12 +145,6 @@ fn config_seg_equal(config: &GlConfig, attrib: c_uint, value: c_uint) -> bool {
 
         let res = config.bind_to_texture_targets == DONT_CARE
             || config.bind_to_texture_targets == equivalent;
-        if !res {
-            log::trace!(
-                "Config of ID {:X} failed on __DRI_ATTRIB_BIND_TO_TEXTURE_TARGETS",
-                config.fbconfig_id
-            );
-        }
         res
     } else if attrib == ffi::__DRI_ATTRIB_SWAP_METHOD {
         let equivalent = if value == ffi::__DRI_ATTRIB_SWAP_EXCHANGE {
@@ -192,13 +174,6 @@ fn raw_compare(config: &GlConfig, attrib: c_uint, value: c_uint) -> bool {
             }
         })
         .unwrap_or(true);
-    if !res {
-        log::trace!(
-            "Config of ID 0x{:X} failed on 0x{:X}",
-            config.fbconfig_id,
-            attrib
-        );
-    }
     res
 }
 
