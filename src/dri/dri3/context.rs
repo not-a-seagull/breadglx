@@ -3,7 +3,10 @@
 use super::{Dri3Drawable, Dri3Screen};
 use crate::{
     config::GlConfig,
-    context::{ContextDispatch, GlContext, GlContextRule, GlInternalContext, InnerGlContext},
+    context::{
+        promote_anyarc_ref, ContextDispatch, GlContext, GlContextRule, GlInternalContext,
+        InnerGlContext,
+    },
     display::{DisplayLike, GlDisplay},
     dri::{convert_dri_rules, ffi, DriRules, ExtensionContainer},
 };
@@ -57,7 +60,7 @@ impl<Dpy> Clone for Dri3Context<Dpy> {
 unsafe impl<Dpy: Send> Send for Dri3Context<Dpy> {}
 unsafe impl<Dpy: Sync> Sync for Dri3Context<Dpy> {}
 
-impl<Dpy> Dri3Context<Dpy> {
+impl<Dpy: Send + Sync + 'static> Dri3Context<Dpy> {
     #[inline]
     fn new_internal(
         screen: Dri3Screen<Dpy>,
@@ -103,14 +106,17 @@ impl<Dpy> Dri3Context<Dpy> {
                 ))?,
                 screen,
                 fbconfig,
-                context_id: CONTEXT_ID.fetch_add(Ordering::AcqRel),
+                context_id: CONTEXT_ID.fetch_add(1, Ordering::AcqRel),
             }),
         })
     }
 
     #[inline]
     pub fn is_current(&self) -> bool {
-        if let Some(ref curr) = GlContext::get() {
+        if let Some(ref curr) = GlContext::<Dpy>::get()
+            .as_ref()
+            .and_then(|m| promote_anyarc_ref::<Dpy>(m))
+        {
             if let ContextDispatch::Dri3(d3) = curr.dispatch() {
                 return d3.dri_context() == self.dri_context();
             }
@@ -119,16 +125,17 @@ impl<Dpy> Dri3Context<Dpy> {
         false
     }
 
+    #[cfg(feature = "async")]
     #[inline]
     pub async fn is_current_async(&self) -> bool {}
 
     #[inline]
-    fn dri_context(&self) -> NonNull<ffi::__DRIcontext> {
+    pub fn dri_context(&self) -> NonNull<ffi::__DRIcontext> {
         self.inner.dri_context
     }
 
     #[inline]
-    fn screen(&self) -> &Dri3Screen<Dpy> {
+    pub fn screen(&self) -> &Dri3Screen<Dpy> {
         &self.inner.screen
     }
 
@@ -139,7 +146,7 @@ impl<Dpy> Dri3Context<Dpy> {
 
     #[inline]
     pub fn context_id(&self) -> usize {
-        self.context_id
+        self.inner.context_id
     }
 
     #[inline]
@@ -154,7 +161,7 @@ impl<Dpy> Dri3Context<Dpy> {
 
 impl<Dpy: DisplayLike> Dri3Context<Dpy>
 where
-    Dpy::Conn: Connection,
+    Dpy::Connection: Connection,
 {
     #[inline]
     pub(crate) fn new(
@@ -171,7 +178,7 @@ where
 #[cfg(feature = "async")]
 impl<Dpy: DisplayLike> Dri3Context<Dpy>
 where
-    Dpy::Conn: AsyncConnection + Send,
+    Dpy::Connection: AsyncConnection + Send,
 {
     #[inline]
     pub(crate) async fn new_async(
@@ -194,7 +201,7 @@ where
 
 impl<Dpy: DisplayLike> GlInternalContext<Dpy> for Dri3Context<Dpy>
 where
-    Dpy::Conn: Connection,
+    Dpy::Connection: Connection,
 {
     #[inline]
     fn bind(
@@ -261,7 +268,7 @@ where
 #[cfg(feature = "async")]
 impl<Dpy: DisplayLike> AsyncGlInternalContext<Dpy> for Dri3Context<Dpy>
 where
-    Dpy::Conn: AsyncConnection + Send,
+    Dpy::Connection: AsyncConnection + Send,
 {
     #[inline]
     fn bind_async<'future, 'a, 'b>(

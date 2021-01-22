@@ -134,7 +134,7 @@ impl<Dpy> GlScreen<Dpy> {
 
 impl<Dpy: DisplayLike> GlScreen<Dpy>
 where
-    Dpy::Conn: Connection,
+    Dpy::Connection: Connection,
 {
     /// Create an OpenGL context.
     #[inline]
@@ -183,7 +183,7 @@ where
 #[cfg(feature = "async")]
 impl<Dpy: DisplayLike> GlScreen<Dpy>
 where
-    Dpy::Conn: AsyncConnection + Send,
+    Dpy::Connection: AsyncConnection + Send,
 {
     /// Create an OpenGL context, async redox.
     #[inline]

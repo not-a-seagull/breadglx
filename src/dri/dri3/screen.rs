@@ -88,7 +88,7 @@ pub struct Dri3ScreenInner<Dpy> {
     visuals: Arc<[GlConfig]>,
 
     // pointers to the extensions
-    image: *const ffi::__DRIimageExtension,
+    pub(crate) image: *const ffi::__DRIimageExtension,
     pub(crate) image_driver: *const ffi::__DRIimageDriverExtension,
     pub(crate) core: *const ffi::__DRIcoreExtension,
     pub(crate) flush: *const ffi::__DRI2flushExtension,
@@ -157,6 +157,7 @@ impl<Dpy: DisplayLike> Dri3ScreenInner<Dpy> {
         &mut self,
         scr: usize,
         fd: c_int,
+        loader_extensions: &[ExtensionContainer],
         extensions: &mut [ExtensionContainer],
     ) -> breadx::Result<()> {
         let mut driver_configs = ptr::null_mut();
@@ -164,7 +165,7 @@ impl<Dpy: DisplayLike> Dri3ScreenInner<Dpy> {
             ((*self.image_driver).createNewScreen2.unwrap())(
                 scr as _,
                 fd,
-                super::loader_extensions::<Dpy>().as_ptr() as *mut _,
+                loader_extensions.as_ptr() as *mut _,
                 extensions.as_mut_ptr() as *mut *const ffi::__DRIextension,
                 &mut driver_configs,
                 // while this could cause undefined behavior, the places where this is used (loader extensions)
@@ -227,29 +228,7 @@ fn get_bootstrap_extensions(
     }
 }
 
-impl<Dpy: DisplayLike> Dri3Screen<Dpy> {
-    #[inline]
-    pub(crate) fn new(
-        dpy: &mut Display<Dpy::Conn>,
-        scr: usize,
-        visuals: Arc<[GlConfig]>,
-        fbconfigs: Arc<[GlConfig]>,
-    ) -> breadx::Result<Self> {
-        Self::new_blocking(dpy, scr, visuals, fbconfigs)
-    }
-
-    #[inline]
-    pub fn dri_screen(&self) -> NonNull<ffi::__DRIscreen> {
-        self.inner.dri_screen.expect("Failed to load DRI screen")
-    }
-
-    #[inline]
-    pub fn weak_ref(&self) -> WeakDri3ScreenRef<Dpy> {
-        WeakDri3ScreenRef {
-            inner: self.inner.downgrade(),
-        }
-    }
-
+impl<Dpy> Dri3Screen<Dpy> {
     #[inline]
     pub(crate) fn driconfig_from_fbconfig(
         &self,
@@ -266,8 +245,25 @@ impl<Dpy: DisplayLike> Dri3Screen<Dpy> {
     }
 
     #[inline]
+    pub fn dri_screen(&self) -> NonNull<ffi::__DRIscreen> {
+        self.inner.dri_screen.expect("Failed to load DRI screen")
+    }
+
+    #[inline]
+    pub fn weak_ref(&self) -> WeakDri3ScreenRef<Dpy> {
+        WeakDri3ScreenRef {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+}
+
+impl<Dpy: DisplayLike> Dri3Screen<Dpy>
+where
+    Dpy::Connection: Connection,
+{
+    #[inline]
     fn new_blocking(
-        dpy: &mut Display<Dpy::Conn>,
+        dpy: &mut Display<Dpy::Connection>,
         scr: usize,
         visuals: Arc<[GlConfig]>,
         fbconfigs: Arc<[GlConfig]>,
@@ -310,7 +306,7 @@ impl<Dpy: DisplayLike> Dri3Screen<Dpy> {
 
         // use the image driver to actually create the screen
         let thisref = Arc::get_mut(&mut this).expect("Infallible Arc::get_mut()");
-        thisref.create_dri_screen(scr, fd, unsafe {
+        thisref.create_dri_screen(scr, fd, super::loader_extensions::<Dpy>(), unsafe {
             &mut *(extensions.as_mut_slice() as *mut [ExtensionContainer])
         })?;
 
@@ -337,10 +333,20 @@ impl<Dpy: DisplayLike> Dri3Screen<Dpy> {
         Ok(Dri3Screen { inner: this.into() })
     }
 
+    #[inline]
+    pub(crate) fn new(
+        dpy: &mut Display<Dpy::Connection>,
+        scr: usize,
+        visuals: Arc<[GlConfig]>,
+        fbconfigs: Arc<[GlConfig]>,
+    ) -> breadx::Result<Self> {
+        Self::new_blocking(dpy, scr, visuals, fbconfigs)
+    }
+
     #[cfg(feature = "async")]
     #[inline]
     pub async fn new_async(
-        dpy: &mut Display<Dpy::Conn>,
+        dpy: &mut Display<Dpy::Connection>,
         scr: usize,
         visuals: Arc<[GlConfig]>,
         fbconfigs: Arc<[GlConfig]>,
@@ -439,7 +445,19 @@ impl<Dpy: DisplayLike> Dri3Screen<Dpy> {
                         })
                         .ok_or(breadx::BreadError::StaticMsg("Failed to find FbConfig ID"))?,
                 };
-                let d = Dri3Drawable::new(dpy, drawable, self.clone(), fbconfig.clone())?;
+                let has_multiplane = match unsafe { self.inner.image.as_ref() } {
+                    Some(image) => image.base.version >= 15,
+                    None => false,
+                };
+
+                let d = Dri3Drawable::new(
+                    dpy,
+                    drawable,
+                    self.clone(),
+                    context.clone(),
+                    fbconfig.clone(),
+                    has_multiplane,
+                )?;
                 self.inner.drawable_map.insert(drawable, d.clone());
                 Ok(d)
             }
@@ -480,7 +498,10 @@ impl<Dpy: DisplayLike> Dri3Screen<Dpy> {
     }
 }
 
-impl<Dpy: DisplayLike> GlInternalScreen<Dpy> for Dri3Screen<Dpy> {
+impl<Dpy: DisplayLike> GlInternalScreen<Dpy> for Dri3Screen<Dpy>
+where
+    Dpy::Connection: Connection,
+{
     #[inline]
     fn create_context(
         &self,

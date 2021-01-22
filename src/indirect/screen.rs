@@ -21,7 +21,7 @@ pub struct IndirectScreen<Dpy> {
 
 impl<Dpy: DisplayLike> GlInternalScreen<Dpy> for IndirectScreen<Dpy>
 where
-    Dpy::Conn: Connection,
+    Dpy::Connection: Connection,
 {
     #[inline]
     fn create_context(
@@ -38,7 +38,7 @@ where
 #[cfg(feature = "async")]
 impl<Dpy: DisplayLike> AsyncGlInternalScreen<Dpy> for IndirectScreen<Dpy>
 where
-    Dpy::Conn: AsyncConnection,
+    Dpy::Connection: AsyncConnection,
 {
     #[inline]
     fn create_context_async<'future, 'a, 'b, 'c, 'd, 'e>(

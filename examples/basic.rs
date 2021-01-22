@@ -11,7 +11,7 @@ use std::{io::Write, env, mem};
 fn main() -> Result<()> {
     env_logger::Builder::new()
         .filter(Some("breadx"), LevelFilter::Warn)
-        .filter(Some("breadglx"), LevelFilter::Info)
+        .filter(Some("breadglx"), LevelFilter::Trace)
         .init();
 
     // establish a connection, wrap it in a GlDisplay, and use that to produce a GlScreen
@@ -24,7 +24,6 @@ fn main() -> Result<()> {
     let extinfo = conn
         .display()
         .query_extension_immediate("GLX".to_string())?;
-    println!("GLX: {:?}", &extinfo);
 
     // find the ideal framebuffer config for our use
     const FBCONFIG_RULES: &[GlConfigRule] = &[
@@ -105,9 +104,9 @@ fn main() -> Result<()> {
         }
     };
 
-    println!("Outside FFI: {:?}", std::thread::current().id());
-
     context.bind(&mut conn, win)?;
+
+    println!("Leaving main thread...");
 
     Ok(())
 }

@@ -21,7 +21,7 @@ pub struct Dri2Screen<Dpy> {
 
 impl<Dpy: DisplayLike> GlInternalScreen<Dpy> for Dri2Screen<Dpy>
 where
-    Dpy::Conn: Connection,
+    Dpy::Connection: Connection,
 {
     #[inline]
     fn create_context(
@@ -38,7 +38,7 @@ where
 #[cfg(feature = "async")]
 impl<Dpy: DisplayLike> AsyncGlInternalScreen<Dpy> for Dri2Screen<Dpy>
 where
-    Dpy::Conn: AsyncConnection + Send,
+    Dpy::Connection: AsyncConnection + Send,
 {
     #[inline]
     fn create_context_async<'future, 'a, 'b, 'c, 'd, 'e>(

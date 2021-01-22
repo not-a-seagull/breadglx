@@ -62,8 +62,6 @@ pub(crate) struct InnerGlContext<Dpy> {
 }
 
 pub(crate) trait GlInternalContext<Dpy> {
-    fn is_direct(&self) -> bool;
-
     /// Bind this context to the given drawable.
     fn bind(
         &self,
@@ -129,9 +127,9 @@ impl<Dpy> GlContext<Dpy> {
     }
 }
 
-impl<Dpy> GlContext<Dpy>
+impl<Dpy: DisplayLike> GlContext<Dpy>
 where
-    Dpy::Conn: Connection,
+    Dpy::Connection: Connection,
 {
     #[inline]
     fn bind_internal(
@@ -180,7 +178,7 @@ where
 #[cfg(feature = "async")]
 impl<Dpy: DisplayLike> GlContext<Dpy>
 where
-    Dpy::Conn: AsyncConnection + Send,
+    Dpy::Connection: AsyncConnection + Send,
 {
     #[inline]
     async fn bind_internal_async(
@@ -252,7 +250,7 @@ fn current_context() -> &'static sync::RwLock<Option<AnyArc>> {
 
 /// Try to promote an AnyArc to a GlContext.
 #[inline]
-pub(crate) fn promote_anyarc<Dpy>(a: AnyArc) -> Option<GlContext<Dpy>> {
+pub(crate) fn promote_anyarc<Dpy: Send + Sync + 'static>(a: AnyArc) -> Option<GlContext<Dpy>> {
     match Arc::downcast::<InnerGlContext<Dpy>>(a) {
         Ok(inner) => Some(GlContext { inner }),
         Err(_) => {
@@ -263,7 +261,9 @@ pub(crate) fn promote_anyarc<Dpy>(a: AnyArc) -> Option<GlContext<Dpy>> {
 }
 
 #[inline]
-pub(crate) fn promote_anyarc_ref<Dpy>(a: &AnyArc) -> Option<&GlContext<Dpy>> {
+pub(crate) fn promote_anyarc_ref<Dpy: Send + Sync + 'static>(
+    a: &AnyArc,
+) -> Option<&GlContext<Dpy>> {
     if Any::is::<InnerGlContext<Dpy>>(&**a) {
         // SAFETY: GlContext is just a transparent wrapper around Arc<InnerGlContext>, so we can safely use
         //         pointer transmutation once we're certain of its inner type
@@ -286,7 +286,9 @@ pub(crate) fn get_current_context() -> RwLockReadGuard<'static, Option<AnyArc>> 
 }
 
 #[inline]
-pub(crate) fn set_current_context<Dpy>(ctx: GlContext<Dpy>) -> Option<AnyArc> {
+pub(crate) fn set_current_context<Dpy: Send + Sync + 'static>(
+    ctx: GlContext<Dpy>,
+) -> Option<AnyArc> {
     cfg_if::cfg_if! {
         if #[cfg(feature = "async")] {
             future::block_on(set_current_context_async(ctx))
@@ -318,7 +320,9 @@ pub(crate) async fn get_current_context_async() -> RwLockReadGuard<'static, Opti
 
 #[cfg(feature = "async")]
 #[inline]
-pub(crate) async fn set_current_context_async<Dpy>(ctx: GlContext<Dpy>) -> Option<AnyArc> {
+pub(crate) async fn set_current_context_async<Dpy: Send + Sync + 'static>(
+    ctx: GlContext<Dpy>,
+) -> Option<AnyArc> {
     mem::replace(&mut *CURRENT_CONTEXT.write().await, Some(ctx.inner))
 }
 

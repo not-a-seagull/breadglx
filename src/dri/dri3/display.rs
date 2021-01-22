@@ -41,9 +41,12 @@ impl<Dpy> fmt::Debug for Dri3Display<Dpy> {
     }
 }
 
-impl<Dpy: DisplayLike> Dri3Display<Dpy> {
+impl<Dpy: DisplayLike> Dri3Display<Dpy>
+where
+    Dpy::Connection: Connection,
+{
     #[inline]
-    pub(crate) fn new(dpy: &mut Display<Dpy::Conn>) -> breadx::Result<Self> {
+    pub(crate) fn new(dpy: &mut Display<Dpy::Connection>) -> breadx::Result<Self> {
         // query whether or not the extension's versions are present
         // note: this automatically triggers ExtensionNotPresent errors
         let dri3iv_tok = dpy.query_dri3_version(DRI3_MAJOR, DRI3_MINOR)?;
@@ -62,7 +65,7 @@ impl<Dpy: DisplayLike> Dri3Display<Dpy> {
 
     #[cfg(feature = "async")]
     #[inline]
-    pub(crate) async fn new_async(dpy: &mut Display<Dpy::Conn>) -> breadx::Result<Self> {
+    pub(crate) async fn new_async(dpy: &mut Display<Dpy::Connection>) -> breadx::Result<Self> {
         // query whether or not the extension's versions are present
         // note: this automatically triggers ExtensionNotPresent errors
         let dri3iv_tok = dpy.query_dri3_version_async(DRI3_MAJOR, DRI3_MINOR).await?;
@@ -82,11 +85,14 @@ impl<Dpy: DisplayLike> Dri3Display<Dpy> {
     }
 }
 
-impl<Dpy: DisplayLike> GlInternalDisplay<Dpy> for Dri3Display<Dpy> {
+impl<Dpy: DisplayLike> GlInternalDisplay<Dpy> for Dri3Display<Dpy>
+where
+    Dpy::Connection: Connection,
+{
     #[inline]
     fn create_screen(
         &self,
-        dpy: &mut Display<Dpy::Conn>,
+        dpy: &mut Display<Dpy::Connection>,
         index: usize,
     ) -> breadx::Result<GlScreen<Dpy>> {
         let (visuals, fbconfigs) = GlConfig::get_visuals_and_fbconfigs(dpy, index)?;
@@ -96,12 +102,17 @@ impl<Dpy: DisplayLike> GlInternalDisplay<Dpy> for Dri3Display<Dpy> {
 
         Ok(GlScreen::from_dri3(index, fbconfigs, visuals, screen))
     }
+}
 
-    #[cfg(feature = "async")]
+#[cfg(feature = "async")]
+impl<Dpy: DisplayLike> GlInternalDisplay<Dpy> for Dri3Display<Dpy>
+where
+    Dpy::Connection: AsyncConnection,
+{
     #[inline]
     fn create_screen_async<'future, 'a, 'b>(
         &'a self,
-        dpy: &'b mut Display<Dpy::Conn>,
+        dpy: &'b mut Display<Dpy::Connection>,
         index: usize,
     ) -> GenericFuture<'future, breadx::Result<GlScreen<Dpy>>>
     where

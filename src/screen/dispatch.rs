@@ -8,6 +8,7 @@ use crate::{
     dri::{dri2, dri3},
     indirect,
 };
+use breadx::display::Connection;
 use std::sync::Arc;
 
 #[cfg(feature = "async")]
@@ -49,7 +50,7 @@ impl<Dpy> From<dri3::Dri3Screen<Dpy>> for ScreenDispatch<Dpy> {
 
 impl<Dpy: DisplayLike> GlInternalScreen<Dpy> for ScreenDispatch<Dpy>
 where
-    Dpy::Conn: Connection,
+    Dpy::Connection: Connection,
 {
     #[inline]
     fn create_context(
@@ -72,7 +73,7 @@ where
 #[cfg(feature = "async")]
 impl<Dpy: DisplayLike> AsyncGlInternalScreen<Dpy> for ScreenDispatch<Dpy>
 where
-    Dpy::Conn: AsyncConnection,
+    Dpy::Connection: AsyncConnection,
 {
     #[inline]
     fn create_context_async<'future, 'a, 'b, 'c, 'd, 'e>(

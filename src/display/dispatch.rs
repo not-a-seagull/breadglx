@@ -51,12 +51,12 @@ impl<Dpy> From<dri3::Dri3Display<Dpy>> for DisplayDispatch<Dpy> {
 
 impl<Dpy: DisplayLike> super::GlInternalDisplay<Dpy> for DisplayDispatch<Dpy>
 where
-    Dpy::Conn: Connection,
+    Dpy::Connection: Connection,
 {
     #[inline]
     fn create_screen(
         &self,
-        dpy: &mut Display<Dpy::Conn>,
+        dpy: &mut Display<Dpy::Connection>,
         index: usize,
     ) -> breadx::Result<GlScreen<Dpy>> {
         match self {
@@ -72,12 +72,12 @@ where
 #[cfg(feature = "async")]
 impl<Dpy: DisplayLike> super::AsyncGlInternalDisplay<Dpy> for DisplayDispatch<Dpy>
 where
-    Dpy::Conn: AsyncConnection,
+    Dpy::Connection: AsyncConnection,
 {
     #[inline]
     fn create_screen_async<'future, 'a, 'b>(
         &'a self,
-        dpy: &'b mut Display<Dpy::Conn>,
+        dpy: &'b mut Display<Dpy::Connection>,
         index: usize,
     ) -> GenericFuture<'future, breadx::Result<GlScreen<Dpy>>>
     where

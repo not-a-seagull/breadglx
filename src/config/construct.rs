@@ -1,7 +1,7 @@
 // MIT/Apache2 License
 
 use super::*;
-use breadx::{AsByteSequence, VisualClass};
+use breadx::{auto::AsByteSequence, VisualClass};
 use std::{convert::TryFrom, slice};
 
 impl GlConfig {

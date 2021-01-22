@@ -49,7 +49,7 @@ struct InnerGlDisplay<Dpy> {
     context: dispatch::DisplayDispatch<Dpy>,
 
     // cache that maps the drawables to a map of their properties
-    drawable_properties: DashMap<Drawable, Arc<HashMap<u32, u32>>>,
+    drawable_properties: DashMap<Drawable, HashMap<u32, u32>>,
 }
 
 /// Represents a lock on the inner display.
@@ -62,7 +62,7 @@ pub struct DisplayLock<'a, Dpy> {
 }
 
 impl<'a, Dpy: DisplayLike> Deref for DisplayLock<'a, Dpy> {
-    type Target = Display<Dpy::Conn>;
+    type Target = Display<Dpy::Connection>;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
@@ -104,7 +104,7 @@ impl<Dpy> Clone for GlDisplay<Dpy> {
 pub(crate) trait GlInternalDisplay<Dpy: DisplayLike> {
     fn create_screen(
         &self,
-        dpy: &mut Display<Dpy::Conn>,
+        dpy: &mut Display<Dpy::Connection>,
         index: usize,
     ) -> breadx::Result<GlScreen<Dpy>>;
 }
@@ -113,7 +113,7 @@ pub(crate) trait GlInternalDisplay<Dpy: DisplayLike> {
 pub(crate) trait AsyncGlInternalDisplay<Dpy: DisplayLike> {
     fn create_screen_async<'future, 'a, 'b>(
         &'a self,
-        dpy: &'b mut Display<Dpy::Conn>,
+        dpy: &'b mut Display<Dpy::Connection>,
         index: usize,
     ) -> GenericFuture<'future, breadx::Result<GlScreen<Dpy>>>
     where
@@ -174,7 +174,7 @@ impl GlStats {
 
 impl<Dpy: DisplayLike> GlDisplay<Dpy>
 where
-    Dpy::Conn: Connection,
+    Dpy::Connection: Connection,
 {
     #[inline]
     pub fn create_screen(&self, screen: usize) -> breadx::Result<GlScreen<Dpy>> {
@@ -203,9 +203,7 @@ where
                     .display()
                     .get_drawable_properties_immediate(drawable.into())?;
                 let propmap: HashMap<u32, u32> = repl.chunks(2).map(|kv| (kv[0], kv[1])).collect();
-                self.inner
-                    .drawable_properties
-                    .insert(drawable, Arc::new(propmap));
+                self.inner.drawable_properties.insert(drawable, propmap);
                 self.inner
                     .drawable_properties
                     .get(&drawable)
@@ -271,7 +269,7 @@ where
 #[cfg(feature = "async")]
 impl<Dpy: DisplayLike> GlDisplay<Dpy>
 where
-    Dpy::Conn: AsyncConnection + Send,
+    Dpy::Connection: AsyncConnection + Send,
 {
     #[inline]
     pub async fn create_screen_async(&mut self, index: usize) -> breadx::Result<GlScreen<Dpy>> {
@@ -288,19 +286,11 @@ where
         drawable: Drawable,
         property: u32,
     ) -> breadx::Result<Option<u32>> {
-        // dashmap has a chance of blocking, so we clone ourselves a few times to get around the
-        // blocking calls
+        // NOTE: DashMap doesn't actually block, it just spins. So we're safe to not push each instance
+        //       of DashMap::get() into the blocking threadpool
         let this = self.clone();
 
-        let map = match blocking::unblock(move || {
-            this.inner
-                .drawable_properties
-                .get(&drawable)
-                .as_deref()
-                .cloned()
-        })
-        .await
-        {
+        let map = match self.inner.drawable_properties.get(&drawable).as_deref() {
             Some(map) => map,
             None => {
                 let repl = self
@@ -309,19 +299,15 @@ where
                     .get_drawable_properties_immediate_async(drawable.into())
                     .await?;
 
-                let this = self.clone();
-                blocking::unblock(move || {
-                    this.inner.drawable_properties.insert(
-                        drawable,
-                        Arc::new(repl.chunks(2).map(|kv| (kv[0], kv[1])).collect()),
-                    );
-                    this.inner
-                        .drawable_properties
-                        .get(&drawable)
-                        .expect("Infallible HashMap::get()")
-                        .clone()
-                })
-                .await
+                self.inner.drawable_properties.insert(
+                    drawable,
+                    Arc::new(repl.chunks(2).map(|kv| (kv[0], kv[1])).collect()),
+                );
+                self.inner
+                    .drawable_properties
+                    .get(&drawable)
+                    .expect("Infallible DashMap::get()")
+                    .clone();
             }
         };
 

@@ -6,36 +6,43 @@
 use super::{Dri3Context, Dri3Screen, WeakDri3ScreenRef};
 use crate::{
     config::GlConfig,
-    context::{promote_anyarc_ref, GlContext, GlInternalContext},
+    context::{promote_anyarc_ref, ContextDispatch, GlContext, GlInternalContext},
     cstr::{const_cstr, ConstCstr},
     display::{DisplayLike, DisplayLock, GlDisplay},
     dri::ffi,
     mesa::xshmfence,
-    util::CallOnDrop,
+    util::{CallOnDrop, ThreadSafe},
 };
 use breadx::{
-    auto::{present::EventMask as PresentEventMask, sync::Fence},
+    auto::{
+        dri3::{BufferFromPixmapReply, BuffersFromPixmapReply},
+        present::EventMask as PresentEventMask,
+        sync::Fence,
+    },
     display::{Connection, Display, Modifiers},
     BreadError::StaticMsg,
-    Drawable, Event, GcParameters, Pixmap, PropMode, PropertyFormat, PropertyType, Window,
+    Drawable, Event, GcParameters, Gcontext, Pixmap, PropMode, PropertyFormat, PropertyType,
+    Window,
 };
 use std::{
+    cell::Cell,
     cmp,
     ffi::c_void,
     future::Future,
-    hint,
+    hint, iter,
     mem::{self, MaybeUninit},
-    num::NonZeroI64,
-    os::raw::{c_int, c_uchar},
+    num::NonZeroU64,
+    os::raw::{c_int, c_uchar, c_uint},
     pin::Pin,
     ptr::{self, NonNull},
     sync::{
         self,
-        atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering},
         Arc,
     },
     task::{Context, Poll, Waker},
 };
+use tinyvec::ArrayVec;
 
 #[cfg(feature = "async")]
 use crate::{offload::offload, util::GenericFuture};
@@ -65,14 +72,18 @@ pub struct Dri3Drawable<Dpy> {
 
     width: AtomicU16,
     height: AtomicU16,
+    depth: AtomicU8,
+
     present_capabilities: AtomicU32,
     eid: AtomicU32,
     is_initialized: AtomicBool,
     window: AtomicU32,
     gc: AtomicU32,
     has_fake_front: AtomicBool,
+    has_back: AtomicBool,
 
     swap_interval: AtomicI32,
+    swap_method: c_int,
     is_pixmap: AtomicBool,
 
     // waiter for the drawable
@@ -94,10 +105,11 @@ pub struct Dri3Drawable<Dpy> {
 pub struct DrawableState {
     send_sbc: u64,
     recv_sbc: u64,
-    notify_mst: u64,
-    notify_ust: u64,
-    mst: u64,
-    ust: u64,
+    notify_msc: i64,
+    notify_ust: i64,
+    msc: i64,
+    ust: i64,
+    sbc: i64,
     last_present_mode: u8,
     cur_back: usize,
     cur_num_back: usize,
@@ -109,7 +121,7 @@ pub struct DrawableState {
 
 #[derive(Debug)]
 pub struct Dri3Buffer {
-    image: NonNull<ffi::__DRIimage>,
+    pub image: NonNull<ffi::__DRIimage>,
     linear_buffer: Option<NonNull<ffi::__DRIimage>>,
 
     sync_fence: Fence,
@@ -117,6 +129,8 @@ pub struct Dri3Buffer {
 
     cpp: u32,
     modifier: u64,
+    width: u16,
+    height: u16,
 
     // we need to reallocate
     reallocate: bool,
@@ -124,10 +138,11 @@ pub struct Dri3Buffer {
     busy: i32,
     pixmap: Pixmap,
     own_pixmap: bool,
+    last_swap: AtomicU64,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum BufferType {
+pub enum BufferType {
     Front,
     Back,
 }
@@ -222,7 +237,10 @@ impl BlitContext {
 }
 
 #[inline]
-fn get_blit_context_internal(draw: &Dri3Drawable, lock: &mut Option<BlitContext>) -> CtxPtr {
+fn get_blit_context_internal<Dpy>(
+    draw: &Dri3Drawable<Dpy>,
+    lock: &mut Option<BlitContext>,
+) -> CtxPtr {
     if let Some(bc) = lock {
         if bc.screen != draw.screen().dri_screen() {
             let bc = lock.take();
@@ -236,11 +254,11 @@ fn get_blit_context_internal(draw: &Dri3Drawable, lock: &mut Option<BlitContext>
         let scr = draw.screen();
         let core = scr.inner.core;
         let ctx = unsafe {
-            ((&*core).createContext.unwrap())(
-                scr.dri_screen(),
+            ((&*core).createNewContext.unwrap())(
+                scr.dri_screen().as_ptr(),
                 ptr::null(),
-                ptr::null(),
-                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
             )
         };
 
@@ -261,7 +279,9 @@ fn get_blit_context_internal(draw: &Dri3Drawable, lock: &mut Option<BlitContext>
 }
 
 #[inline]
-fn get_blit_context(draw: &Dri3Drawable) -> (CtxPtr, MutexGuard<'static, BlitContext>) {
+fn get_blit_context<Dpy>(
+    draw: &Dri3Drawable<Dpy>,
+) -> (CtxPtr, MutexGuard<'static, Option<BlitContext>>) {
     #[cfg(not(feature = "async"))]
     let mut blit_context = BLIT_CONTEXT
         .lock()
@@ -277,9 +297,9 @@ fn get_blit_context(draw: &Dri3Drawable) -> (CtxPtr, MutexGuard<'static, BlitCon
 
 #[cfg(feature = "async")]
 #[inline]
-async fn get_blit_context_async(
-    draw: Arc<Dri3Drawable>,
-) -> (CtxPtr, MutexGuard<'static, BlitContext>) {
+async fn get_blit_context_async<Dpy>(
+    draw: Arc<Dri3Drawable<Dpy>>,
+) -> (CtxPtr, MutexGuard<'static, Option<BlitContext>>) {
     let mut blit_context = BLIT_CONTEXT.lock().await;
     let draw = draw.clone();
 
@@ -289,6 +309,7 @@ async fn get_blit_context_async(
             blit_context,
         )
     })
+    .await
 }
 
 impl DrawableState {
@@ -315,6 +336,31 @@ impl DrawableState {
 }
 
 impl<Dpy> Dri3Drawable<Dpy> {
+    #[inline]
+    pub fn is_pixmap(&self) -> bool {
+        self.is_pixmap.load(Ordering::SeqCst)
+    }
+
+    #[inline]
+    pub fn is_different_gpu(&self) -> bool {
+        self.is_different_gpu
+    }
+
+    #[inline]
+    pub fn swap_method(&self) -> c_int {
+        self.swap_method
+    }
+
+    #[inline]
+    pub fn set_have_fake_front(&self, val: bool) {
+        self.has_fake_front.store(val, Ordering::SeqCst)
+    }
+
+    #[inline]
+    pub fn set_have_back(&self, val: bool) {
+        self.has_back.store(val, Ordering::SeqCst)
+    }
+
     #[inline]
     pub fn dri_drawable(&self) -> NonNull<ffi::__DRIdrawable> {
         self.drawable
@@ -360,7 +406,7 @@ impl<Dpy> Dri3Drawable<Dpy> {
 
         macro_rules! geti {
             ($arr: expr, $index: expr) => {{
-                ($arr)
+                *($arr)
                     .get($index)
                     .ok_or(breadx::BreadError::StaticErr(&NEB_ERROR))?
             }};
@@ -403,13 +449,13 @@ impl<Dpy> Dri3Drawable<Dpy> {
                     geti!(bytes, 23),
                 ]);
                 // ust is at bytes 25 thru 32
-                let mut ust = [0u64; 8];
+                let mut ust = [0; 8];
                 ust.copy_from_slice(&bytes[25..32]);
-                let ust = u64::from_ne_bytes(ust);
+                let ust = i64::from_ne_bytes(ust);
                 // mst is at bytes 36 thru 44
-                let mut mst = [0u64; 8];
-                mst.copy_from_slice(&bytes[36..44]);
-                let mst = u64::from_ne_bytes(mst);
+                let mut msc = [0; 8];
+                msc.copy_from_slice(&bytes[36..44]);
+                let msc = i64::from_ne_bytes(msc);
                 // kind is at byte 10
                 match bytes[10] {
                     0 => {
@@ -418,7 +464,7 @@ impl<Dpy> Dri3Drawable<Dpy> {
                         if recv_sbc <= state.send_sbc {
                             state.recv_sbc = recv_sbc;
                         } else if recv_sbc == state.recv_sbc.wrapping_add(0x100000001u64) {
-                            state.recv_sc = recv_sbc.wrapping_sub(0x100000000u64);
+                            state.recv_sbc = recv_sbc.wrapping_sub(0x100000000u64);
                         }
 
                         let mode = bytes[11];
@@ -429,19 +475,19 @@ impl<Dpy> Dri3Drawable<Dpy> {
                         {
                             state.buffers.iter_mut().for_each(|buffer| {
                                 if let Some(buffer) = buffer.as_mut() {
-                                    buffer.reallocate = true
+                                    Arc::get_mut(buffer).unwrap().reallocate = true
                                 }
                             });
                         }
 
                         state.last_present_mode = mode;
                         state.ust = ust;
-                        state.mst = mst;
+                        state.msc = msc;
                     }
                     _ => {
-                        if self.eid.load(Ordering::Acquire).xid == serial {
+                        if self.eid.load(Ordering::Acquire) == serial {
                             state.notify_ust = ust;
-                            state.notify_mst = msg;
+                            state.notify_msc = msc;
                         }
                     }
                 }
@@ -460,7 +506,7 @@ impl<Dpy> Dri3Drawable<Dpy> {
                 state.buffers.iter_mut().for_each(|buffer| {
                     if let Some(buffer) = buffer.as_mut() {
                         if buffer.pixmap == pixmap {
-                            buffer.busy = 0;
+                            Arc::get_mut(buffer).unwrap().busy = 0;
                         }
                     }
                 });
@@ -473,11 +519,11 @@ impl<Dpy> Dri3Drawable<Dpy> {
 
     #[inline]
     fn state(&self) -> MutexGuard<'_, DrawableState> {
-        cfg_if! {
+        cfg_if::cfg_if! {
             if #[cfg(feature = "async")] {
-                self.state.lock().expect(STATE_LOCK_FAILED)
-            } else {
                 future::block_on(self.state.lock())
+            } else {
+                self.state.lock().expect(STATE_LOCK_FAILED)
             }
         }
     }
@@ -489,18 +535,20 @@ impl<Dpy> Dri3Drawable<Dpy> {
     }
 
     #[inline]
-    fn event_wait(&self, guard: MutexGuard<'_, DrawableState>) -> MutexGuard<'_, DrawableState> {
-        #[cfg(not(feature = "async"))]
-        {
-            self.event_waiter
-                .wait(guard)
-                .expect("Failed to wait for present events")
-        }
-        #[cfg(feature = "async")]
-        {
-            mem::drop(guard);
-            self.event_waiter.listen().wait();
-            future::block_on(self.state.lock())
+    fn event_wait<'a>(
+        &'a self,
+        guard: MutexGuard<'a, DrawableState>,
+    ) -> MutexGuard<'a, DrawableState> {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "async")] {
+                mem::drop(guard);
+                self.event_waiter.listen().wait();
+                future::block_on(self.state.lock())
+            } else {
+                self.event_waiter
+                    .wait(guard)
+                    .expect("Failed to wait for present events")
+            }
         }
     }
 
@@ -519,9 +567,7 @@ impl<Dpy> Dri3Drawable<Dpy> {
     fn event_broadcast(&self) {
         #[cfg(not(feature = "async"))]
         {
-            self.event_waiter
-                .notify_all()
-                .expect("Failed to wake condvar")
+            self.event_waiter.notify_all()
         }
         #[cfg(feature = "async")]
         {
@@ -535,12 +581,12 @@ impl<Dpy: DisplayLike> Dri3Drawable<Dpy> {
     #[inline]
     fn process_present_events<'a>(
         &self,
-        conn: &mut Display<Dpy::Conn>,
+        conn: &mut Display<Dpy::Connection>,
         state_lock: &mut DrawableState,
     ) -> breadx::Result<bool> {
         // use an iterator to handle the events
         let needs_invalidate = conn
-            .get_special_events()
+            .get_special_events(self.eid.load(Ordering::Relaxed))
             .map(|event| self.process_present_event(state_lock, event))
             .collect::<breadx::Result<Vec<bool>>>()?;
         Ok(needs_invalidate.iter().any(|b| *b))
@@ -549,13 +595,14 @@ impl<Dpy: DisplayLike> Dri3Drawable<Dpy> {
 
 impl<Dpy: DisplayLike> Dri3Drawable<Dpy>
 where
-    Dpy::Conn: Connection,
+    Dpy::Connection: Connection,
 {
     #[inline]
     pub fn new(
         dpy: &GlDisplay<Dpy>,
         drawable: Drawable,
         screen: Dri3Screen<Dpy>,
+        context: Dri3Context<Dpy>,
         config: GlConfig,
         has_multiplane: bool,
     ) -> breadx::Result<Arc<Self>> {
@@ -570,30 +617,46 @@ where
         }
 
         // get the width and height of the drawable
-        let geometry = breadx::drawable::get_geometry_immediate(&mut *dpy.display(), drawable)?;
+        let geometry = dpy.display().get_drawable_geometry_immediate(drawable)?;
+
+        let mut swap_method = ffi::__DRI_ATTRIB_SWAP_UNDEFINED;
+        if unsafe { (&*screen.inner.core) }.base.version >= 2 {
+            unsafe {
+                ((&*screen.inner.core).getConfigAttrib.unwrap())(
+                    screen.driconfig_from_fbconfig(&config).unwrap().as_ptr(),
+                    ffi::__DRI_ATTRIB_SWAP_METHOD,
+                    &mut swap_method,
+                )
+            };
+        }
 
         let mut this = Arc::new(Self {
             drawable: NonNull::dangling(),
             x_drawable: drawable,
             config,
             is_different_gpu: screen.inner.is_different_gpu,
-            multiplanes_available: has_multiplanes,
+            multiplanes_available: has_multiplane,
             screen: screen.weak_ref(),
+            context,
             width: AtomicU16::new(geometry.width),
             height: AtomicU16::new(geometry.height),
+            depth: AtomicU8::new(geometry.depth),
             eid: AtomicU32::new(0),
             is_initialized: AtomicBool::new(false),
             present_capabilities: AtomicU32::new(0),
             window: AtomicU32::new(0),
             gc: AtomicU32::new(0),
             swap_interval: AtomicI32::new(swap_interval as _),
-            is_pixmap: false,
+            is_pixmap: AtomicBool::new(false),
             display: dpy.clone(),
+            swap_method: swap_method as _,
+            has_fake_front: AtomicBool::new(false),
+            has_back: AtomicBool::new(true),
             #[cfg(feature = "async")]
             state: async_lock::Mutex::new(Default::default()),
             #[cfg(not(feature = "async"))]
             state: sync::Mutex::new(Default::default()),
-            has_event_waiter: false,
+            has_event_waiter: AtomicBool::new(false),
             #[cfg(feature = "async")]
             event_waiter: event_listener::Event::new(),
             #[cfg(not(feature = "async"))]
@@ -601,8 +664,7 @@ where
         });
 
         // create the drawable pointer
-        let dri_drawable =
-            create_the_drawable(&this.screen, &this.config, Arc::as_ptr(&this) as _)?;
+        let dri_drawable = create_the_drawable(&screen, &this.config, Arc::as_ptr(&this) as _)?;
         Arc::get_mut(&mut this)
             .expect("Infallible Arc::get_mut()")
             .drawable = dri_drawable.0;
@@ -611,9 +673,9 @@ where
     }
 
     #[inline]
-    fn drawable_gc(&self, conn: &mut Display<Dpy::Conn>) {
-        let mut gc = self.gc.load(Ordering::Acquire);
-        if gc == 0 {
+    fn drawable_gc(&self, conn: &mut Display<Dpy::Connection>) -> breadx::Result<Gcontext> {
+        let mut gc = Gcontext::const_from_xid(self.gc.load(Ordering::Acquire));
+        if gc.xid == 0 {
             gc = conn.create_gc(
                 self.x_drawable,
                 GcParameters {
@@ -621,17 +683,20 @@ where
                     ..Default::default()
                 },
             )?;
-            self.gc.store(gc, Ordering::Release);
+            self.gc.store(gc.xid, Ordering::Release);
         }
-        gc
+        Ok(gc)
     }
 
     /// Wait for present events to occur.
     #[inline]
-    fn wait_for_event(
-        &self,
-        state_lock: &mut Option<MutexGuard<'_, DrawableState>>,
-    ) -> breadx::Result<()> {
+    fn wait_for_event<'a, 'b>(
+        &'a self,
+        state_lock: &'b mut Option<MutexGuard<'a, DrawableState>>,
+    ) -> breadx::Result<()>
+    where
+        'a: 'b,
+    {
         if self.has_event_waiter.load(Ordering::SeqCst) {
             // another thread is polling for events for this drawable, wait a minute
             let sl = state_lock.take().expect("Non-exclusive lock?!?!");
@@ -641,16 +706,15 @@ where
             self.has_event_waiter.store(true, Ordering::SeqCst);
             // drop the lock, then poll the display, then re-acquire the lock
             mem::drop(state_lock.take());
-            let res = self
-                .display
-                .display()
-                .wait_for_special_event(self.eid.load(Ordering::Relaxed))?;
+            let mut conn = self.display.display();
+            let res = conn.wait_for_special_event(self.eid.load(Ordering::Relaxed));
+            mem::drop(conn);
             *state_lock = Some(self.state());
             self.has_event_waiter.store(false, Ordering::SeqCst);
             self.event_broadcast();
             let event = res?;
 
-            if self.process_event(event)? {
+            if self.process_present_event(state_lock.as_mut().unwrap(), event)? {
                 self.invalidate();
             }
 
@@ -659,7 +723,7 @@ where
     }
 
     #[inline]
-    fn wait_for_sbc(&self, target_sbc: Option<NonZeroI64>) -> breadx::Result<SwapBufferCount> {
+    fn wait_for_sbc(&self, target_sbc: Option<NonZeroU64>) -> breadx::Result<SwapBufferCount> {
         let mut state = self.state();
         let target_sbc = match target_sbc {
             Some(tsbc) => tsbc.get(),
@@ -668,8 +732,11 @@ where
 
         let mut state = Some(state);
 
-        while state.recv_sbc < target_sbc {
-            self.wait_for_event(&mut Some(state))?;
+        while {
+            let r = state.as_ref().unwrap().recv_sbc;
+            r < target_sbc
+        } {
+            self.wait_for_event(&mut state)?;
         }
 
         let state = state.expect("Shouldn't ever happen (unless we've somehow panicked!)!");
@@ -688,41 +755,50 @@ where
 
     /// Find the ID associated with the back buffer.
     #[inline]
-    fn find_back(
-        &self,
+    fn find_back<'a, 'b>(
+        &'a self,
         mut conn: DisplayLock<'_, Dpy>,
-        state_lock: &mut Option<MutexGuard<'_, DrawableState>>,
-    ) -> breadx::Result<i32> {
-        if self.process_present_events(&mut *conn, state_lock)? {
+        state: &'b mut Option<MutexGuard<'a, DrawableState>>,
+    ) -> breadx::Result<usize>
+    where
+        'a: 'b,
+    {
+        if self.process_present_events(&mut *conn, state.as_mut().unwrap())? {
             self.invalidate();
         }
         mem::drop(conn); // we need to poll it later
 
-        let mut state = state_lock.as_deref_mut().expect("Infallible");
         let (mut num_to_consider, max_num) = if self.has_blit_image() {
-            (state.cur_num_back, state.max_num_back)
+            (
+                state.as_mut().unwrap().cur_num_back,
+                state.as_mut().unwrap().max_num_back,
+            )
         } else {
-            state.cur_blit_source = -1;
+            state.as_mut().unwrap().cur_blit_source = -1;
             (1, 1)
         };
 
         loop {
             for i in 0..num_to_consider {
-                let id = back_id((i + state.cur_back) * state.cur_num_back);
-                match &mut state.buffers[id] {
-                    None | Some(buffer { busy: 0, .. }) => {
-                        state.cur_back = id;
-                        return id;
-                    }
+                let id = back_id(
+                    (i + state.as_mut().unwrap().cur_back) * state.as_mut().unwrap().cur_num_back,
+                );
+                if state.as_mut().unwrap().buffers[id]
+                    .as_ref()
+                    .map(|b| b.busy == 0)
+                    .unwrap_or(true)
+                {
+                    state.as_mut().unwrap().cur_back = id;
+                    return Ok(id);
                 }
             }
 
             if num_to_consider < max_num {
-                state.cur_num_back += 1;
-                num_to_consider = state_lock.cur_num_back;
+                state.as_mut().unwrap().cur_num_back += 1;
+                num_to_consider = state.as_mut().unwrap().cur_num_back;
             } else {
                 // wait for an event
-                self.wait_for_event(state_lock)?;
+                self.wait_for_event(state)?;
             }
         }
     }
@@ -749,7 +825,7 @@ where
         let (dri_context, _guard) = if self.context.is_current() {
             (self.context.dri_context(), None)
         } else {
-            flush_flag |= ffi::__BLIT_FLAG_FLUSH;
+            flush_flag |= ffi::__BLIT_FLAG_FLUSH as c_int;
             let (dri_context, guard) = get_blit_context(self);
             let dri_context = match dri_context.0 {
                 Some(dc) => dc,
@@ -785,12 +861,12 @@ where
         let mut state = self.state();
         let (first_id, n_ids) = match buffer_type {
             BufferType::Back => {
-                state.cur_bit_source = -1;
+                state.cur_blit_source = -1;
                 (back_id(0), MAX_BACK)
             }
             BufferType::Front => (
                 FRONT_ID,
-                if state.cur_blit_source == FRONT_ID {
+                if state.cur_blit_source == FRONT_ID as _ {
                     0
                 } else {
                     1
@@ -798,7 +874,7 @@ where
             ),
         };
 
-        (first_id..first_id + n_ids).try_for_each(|i| {
+        (first_id..first_id + n_ids).try_for_each::<_, breadx::Result<()>>(|i| {
             if let Some(buffer) = state.buffers[i].take() {
                 free_buffer_arc(buffer, self)?;
             }
@@ -808,18 +884,33 @@ where
         Ok(())
     }
 
+    /// Free unneeded back buffers.
+    #[inline]
+    pub fn free_back_buffers(&self) -> breadx::Result {
+        let mut state = self.state();
+        for id in state.cur_num_back..MAX_BACK {
+            if id as i32 != state.cur_blit_source && state.buffers[id].is_some() {
+                free_buffer_arc(state.buffers[id].take().unwrap(), self)?;
+            }
+        }
+        Ok(())
+    }
+
     #[inline]
     fn buffer_id(&self, ty: BufferType) -> breadx::Result<usize> {
-        match ty {
-            BufferType::Back => self.find_back(self.display.display(), &mut Some(self.state()))?,
+        Ok(match ty {
+            BufferType::Back => {
+                let mut state = Some(self.state());
+                self.find_back(self.display.display(), &mut state)?
+            }
             BufferType::Front => FRONT_ID,
-        }
+        })
     }
 
     /// Get the buffer associated with the given format and buffer type.
     #[inline]
-    pub fn get_buffer(
-        &self,
+    pub fn get_buffer<'a>(
+        &'a self,
         buffer_type: BufferType,
         format: c_uint,
     ) -> breadx::Result<Arc<Dri3Buffer>> {
@@ -833,70 +924,41 @@ where
         let mut conn = self.display.display();
         let mut fence_await = false;
 
-        let buffer = match state.as_ref().unwrap().buffers[buf_id] {
-            None | Some(ref buffer)
-                if buffer.reallocate || buffer.width != width || buffer.height != height =>
+        let mut create_new_buffer = move |state: &mut Option<MutexGuard<'a, DrawableState>>| -> breadx::Result<Arc<Dri3Buffer>> {
+            // create a new buffer
+            let mut new_buffer = Dri3Buffer::new(
+                self,
+                format,
+                width,
+                height,
+                self.depth.load(Ordering::SeqCst),
+            )?;
+
+            let buffer = state.as_mut().unwrap().buffers[buf_id].take();
+            if buffer.is_some()
+                && (!matches!(buffer_type, BufferType::Front)
+                    || self.has_fake_front.load(Ordering::Acquire))
             {
-                // create a new buffer
-                let mut new_buffer = Dri3Buffer::new(
-                    self,
-                    format,
-                    width,
-                    height,
-                    self.depth.load(Ordering::SeqCst),
-                )?;
-
-                let buffer = state.as_ref().unwrap().buffers[buf_id].take();
-                if buffer.is_some()
-                    && (!matches!(buffer_type, BufferType::Front)
-                        || self.have_fake_front.load(Ordering::Acquire))
+                let buffer = buffer.unwrap();
+                if self
+                    .blit_images(
+                        ImgPtr(new_buffer.image),
+                        ImgPtr(buffer.image),
+                        0,
+                        0,
+                        cmp::min(buffer.width.into(), new_buffer.width.into()),
+                        cmp::min(buffer.height.into(), new_buffer.height.into()),
+                        0,
+                        0,
+                        0,
+                    )
+                    .is_err()
+                    && buffer.linear_buffer.is_none()
                 {
-                    let buffer = buffer.unwrap();
-                    if self
-                        .blit_images(
-                            new_buffer.image,
-                            buffer.image,
-                            0,
-                            0,
-                            cmp::min(buffer.width, new_buffer.width),
-                            cmp::min(buffer.height, new_buffer.height),
-                            0,
-                            0,
-                            0,
-                        )
-                        .is_err()
-                        && buffer.linear_buffer.is_none()
-                    {
-                        fence_reset(new_buffer.shm_fence);
-                        gc = self.drawable_gc(&mut *conn)?;
-                        conn.copy_area(
-                            buffer.pixmap,
-                            new_buffer.pixmap,
-                            gc,
-                            0,
-                            0,
-                            width,
-                            height,
-                            0,
-                            0,
-                        )?;
-                        fence_trigger(&mut conn, new_buffer.sync_fence)?;
-                        fence_await = true;
-                    }
-
-                    if let Some(buffer) = buffer {
-                        mem::drop(conn);
-                        free_buffer_arc(buffer, self)?;
-                    }
-                } else if matches!(buffer_type, BufferType::Front) {
-                    // fill the new fake front with data from the real front
-                    mem::drop((conn, state.take()));
-                    self.swapbuffer_barrier();
-                    let mut conn = self.display.display();
-                    fence_reset(new_buffer.shm_fence);
+                    reset_fence(new_buffer.shm_fence);
                     let gc = self.drawable_gc(&mut *conn)?;
                     conn.copy_area(
-                        self.x_drawable,
+                        buffer.pixmap,
                         new_buffer.pixmap,
                         gc,
                         0,
@@ -906,35 +968,63 @@ where
                         0,
                         0,
                     )?;
-                    fence_trigger(&mut conn, new_buffer.sync_buffer);
-
-                    if let Some(linear_buffer) = new_buffer.linear_buffer {
-                        block_on_fence(&mut *conn, Some(self), &new_buffer)?;
-                        self.blit_images(
-                            new_buffer.image.into(),
-                            new_buffer.linear_buffer.into(),
-                            gc,
-                            0,
-                            0,
-                            width,
-                            height,
-                            0,
-                            0,
-                        )?;
-                    } else {
-                        fence_await = true;
-                    }
+                    trigger_fence::<Dpy>(&mut conn, new_buffer.sync_fence)?;
+                    fence_await = true;
                 }
 
-                state = Some(self.state());
-                let new_buffer = Arc::new(new_buffer);
-                state.as_mut().unwrap().buffers[buf_id] = Some(new_buffer.clone());
-                new_buffer
-            }
-            Some(ref buffer) => {
                 mem::drop(conn);
-                buffer.clone()
+                free_buffer_arc(buffer, self)?;
+            } else if matches!(buffer_type, BufferType::Front) {
+                // fill the new fake front with data from the real front
+                mem::drop((conn, state.take()));
+                self.swapbuffer_barrier()?;
+                let mut conn = self.display.display();
+                reset_fence(new_buffer.shm_fence);
+                let gc = self.drawable_gc(&mut *conn)?;
+                conn.copy_area(
+                    self.x_drawable,
+                    new_buffer.pixmap,
+                    gc,
+                    0,
+                    0,
+                    width,
+                    height,
+                    0,
+                    0,
+                )?;
+                trigger_fence::<Dpy>(&mut conn, new_buffer.sync_fence)?;
+
+                if let Some(linear_buffer) = new_buffer.linear_buffer {
+                    block_on_fence(&mut *conn, Some(self), &new_buffer)?;
+                    self.blit_images(
+                        ImgPtr(new_buffer.image),
+                        ImgPtr(linear_buffer),
+                        0,
+                        0,
+                        width.into(),
+                        height.into(),
+                        0,
+                        0,
+                        0,
+                    )?;
+                } else {
+                    fence_await = true;
+                }
             }
+
+            *state = Some(self.state());
+            state.as_mut().unwrap().buffers[buf_id] = Some(new_buffer.clone());
+            Ok(new_buffer)
+        };
+
+        let buffer = match state.as_ref().unwrap().buffers[buf_id] {
+            None => create_new_buffer(&mut state)?,
+            Some(ref buffer)
+                if buffer.reallocate || buffer.width != width || buffer.height != height =>
+            {
+                create_new_buffer(&mut state)?
+            }
+            Some(ref buffer) => buffer.clone(),
         };
 
         if fence_await {
@@ -945,21 +1035,39 @@ where
         let mut state = state.unwrap();
         if matches!(buffer_type, BufferType::Back)
             && state.cur_blit_source != -1
-            && state.buffers[state.cur_blit_source]
-            && !Arc::ptr_eq(&buffer, &state.buffers[state.cur_blit_source])
+            && state.buffers[state.cur_blit_source as usize].is_some()
+            && !Arc::ptr_eq(
+                &buffer,
+                &state.buffers[state.cur_blit_source as usize]
+                    .as_ref()
+                    .unwrap(),
+            )
         {
             self.blit_images(
-                buffer.image,
-                state.buffers[state.cur_blit_source].image,
+                ImgPtr(buffer.image),
+                ImgPtr(
+                    state.buffers[state.cur_blit_source as usize]
+                        .as_ref()
+                        .unwrap()
+                        .image,
+                ),
                 0,
                 0,
-                width,
-                height,
+                width.into(),
+                height.into(),
                 0,
                 0,
                 0,
             )?;
-            buffer.last_swap = state.buffers[state.cur_blit_source].last_swap;
+
+            buffer.last_swap.store(
+                state.buffers[state.cur_blit_source as usize]
+                    .as_ref()
+                    .unwrap()
+                    .last_swap
+                    .load(Ordering::Acquire),
+                Ordering::Release,
+            );
             state.cur_blit_source = -1;
         }
 
@@ -967,7 +1075,7 @@ where
     }
 
     #[inline]
-    fn get_pixmap_buffer(
+    pub fn get_pixmap_buffer(
         &self,
         buffer_type: BufferType,
         format: c_uint,
@@ -979,14 +1087,16 @@ where
 
         // TODO: a lot of stuff is reused here from Dri3Buffer::new(). consolidate it into its
         // own function
+        let mut buffer: Arc<MaybeUninit<Dri3Buffer>> = Arc::new_uninit();
+        let this_screen = self.screen();
 
         let xshmfence = xshmfence()?;
-        let alloc_shm: XshmfenceAllocShm = unsafe { xshmfence.symbol(&XSHMFENCE_ALLOC_SHM) }
+        let alloc_shm: XshmfenceAllocShm = unsafe { xshmfence.function(&XSHMFENCE_ALLOC_SHM) }
             .expect("xshmfence_alloc_shm not present");
-        let map_shm: XshmfenceMapShm =
-            unsafe { xshmfence.symbol(&XSHMFENCE_MAP_SHM) }.expect("xshmfence_map_shm not present");
+        let map_shm: XshmfenceMapShm = unsafe { xshmfence.function(&XSHMFENCE_MAP_SHM) }
+            .expect("xshmfence_map_shm not present");
         let unmap_shm: XshmfenceUnmapShm =
-            unsafe { xshmfence.symbol(&XSHMFENCE_UNMAP_SHM) }.expect("xshmfence_unmap_shm");
+            unsafe { xshmfence.function(&XSHMFENCE_UNMAP_SHM) }.expect("xshmfence_unmap_shm");
 
         // set up fencing and all
         let fence_fd = unsafe { (alloc_shm)() };
@@ -1013,12 +1123,83 @@ where
             }
         };
 
-        let fence_guard = CallOnDrop(|| {
+        let fence_guard = CallOnDrop::new(|| {
             unsafe { (unmap_shm)(shm_fence.as_ptr()) };
             unsafe { libc::close(fence_fd) };
         });
 
+        // get the screen belogning to the current context, or our screen if nothing else
+        let screen = if let Some(ref ctx) = GlContext::<Dpy>::get()
+            .as_ref()
+            .and_then(|m| promote_anyarc_ref::<Dpy>(m))
+        {
+            if let ContextDispatch::Dri3(d3) = ctx.dispatch() {
+                d3.screen().dri_screen()
+            } else {
+                this_screen.dri_screen()
+            }
+        } else {
+            this_screen.dri_screen()
+        };
+        let pixmap = Pixmap::const_from_xid(self.x_drawable.xid);
+
+        let (image, width, height) = if self.multiplanes_available
+            && unsafe { (&*this_screen.inner.image) }.base.version >= 15
+            && unsafe { (&*this_screen.inner.image) }
+                .createImageFromDmaBufs2
+                .is_some()
+        {
+            let bfp = conn.buffers_from_pixmap_immediate(pixmap)?;
+            let width = bfp.width;
+            let height = bfp.height;
+            let image = image_from_buffers(
+                &self.screen(),
+                format,
+                bfp,
+                unsafe { ThreadSafe::new(screen.as_ptr()) },
+                unsafe { ThreadSafe::new(buffer.as_ptr() as *const ()) },
+            )?;
+            (image.into_inner(), width, height)
+        } else {
+            let bfp = conn.buffer_from_pixmap_immediate(pixmap)?;
+            let width = bfp.width;
+            let height = bfp.height;
+            let image = image_from_buffer(
+                &self.screen(),
+                format,
+                bfp,
+                unsafe { ThreadSafe::new(screen.as_ptr()) },
+                unsafe { ThreadSafe::new(buffer.as_ptr() as *const ()) },
+            )?;
+            (image.into_inner(), width, height)
+        };
+
         mem::forget(fence_guard);
+
+        unsafe {
+            ptr::write(
+                Arc::get_mut(&mut buffer)
+                    .expect("Infallible Arc::get_mut()")
+                    .as_mut_ptr(),
+                Dri3Buffer {
+                    image,
+                    linear_buffer: None,
+                    sync_fence,
+                    shm_fence,
+                    pixmap,
+                    own_pixmap: false,
+                    busy: 0,
+                    reallocate: false,
+                    cpp: 0,
+                    modifier: 0,
+                    width,
+                    height,
+                    last_swap: AtomicU64::new(0),
+                },
+            )
+        };
+
+        Ok(unsafe { buffer.assume_init() })
     }
 
     #[inline]
@@ -1029,7 +1210,7 @@ where
     /// Update this drawable.
     #[inline]
     pub fn update(&self) -> breadx::Result {
-        let guard = self.state();
+        let mut guard = self.state();
 
         // acquire a lock on the display
         let mut conn = self.display.display();
@@ -1048,27 +1229,14 @@ where
 
             // query a few requests
             conn.register_special_event(eid);
-            let select_input_tok = conn.present_select_input(
+            let capabilities_tok = conn.present_capabilities(self.x_drawable)?;
+            let geometry_tok = conn.get_drawable_geometry(self.x_drawable)?;
+            let select_input = conn.present_select_input(
                 eid,
-                self.drawable,
+                Window::const_from_xid(self.x_drawable.xid),
                 PresentEventMask::CONFIGURE_NOTIFY
                     | PresentEventMask::COMPLETE_NOTIFY
                     | PresentEventMask::IDLE_NOTIFY,
-            )?;
-            let capabilities_tok = conn.present_capabilities(self.drawable)?;
-            let geometry_tok = conn.get_drawable_geometry(self.drawable)?;
-
-            // match the error on the geometry and select input results, if they are
-            // BadWindow, this is a pixmap
-            let select_input = conn.resolve_request(select_input_tok);
-            let geometry = conn.resolve_request(geometry_tok)?;
-
-            self.capabilities.store(
-                match conn.resolve_request(capabilities_tok) {
-                    Ok(cap) => cap.capabilities,
-                    Err(_) => 0,
-                },
-                Ordering::Relaxed,
             );
 
             // if we got a BadWindow error, we can just circumvent that
@@ -1084,6 +1252,18 @@ where
                 }
                 Err(err) => return Err(err),
             };
+
+            // match the error on the geometry and select input results, if they are
+            // BadWindow, this is a pixmap
+            let geometry = conn.resolve_request(geometry_tok)?;
+
+            self.present_capabilities.store(
+                match conn.resolve_request(capabilities_tok) {
+                    Ok(cap) => cap.capabilities,
+                    Err(_) => 0,
+                },
+                Ordering::Relaxed,
+            );
 
             self.window.store(
                 if is_pixmap {
@@ -1117,17 +1297,17 @@ where
 
     #[inline]
     pub fn has_supported_modifier(&self, format: c_uint, modifiers: &[u64]) -> bool {
-        let query_dma_bufs = match unsafe { &*self.screen.inner.image }.queryDmaBufModifiers {
+        let query_dma_bufs = match unsafe { &*self.screen().inner.image }.queryDmaBufModifiers {
             Some(qdb) => qdb,
             None => return false,
         };
 
         // first, get the actual number of supported modifiers
-        let mut mod_count = MaybeUninit::<i32>::uninit();
+        let mut mod_count = MaybeUninit::<c_int>::uninit();
         if unsafe {
             query_dma_bufs(
-                self.dri_drawable().as_ptr(),
-                format,
+                self.screen().dri_screen().as_ptr(),
+                format as _,
                 0,
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -1137,6 +1317,9 @@ where
         {
             return false;
         }
+
+        // SAFETY: If queryDmaBufModifiers succeeded, mod_count is contractly supposed
+        //         to have been set.
         let mut mod_count = unsafe { MaybeUninit::assume_init(mod_count) };
         if mod_count == 0 {
             return false;
@@ -1146,17 +1329,20 @@ where
         let mut modifiers = Box::<[u64]>::new_uninit_slice(mod_count as usize);
         unsafe {
             query_dma_bufs(
-                self.dri_drawable().as_ptr(),
-                format,
-                mod_count as i32,
+                self.screen().dri_screen().as_ptr(),
+                format as _,
+                mod_count,
+                ptr::null_mut(),
                 ptr::null_mut(),
                 &mut mod_count,
             )
         };
+        // SAFETY: Same rules as above.
+        let modifiers = unsafe { modifiers.assume_init() };
 
         modifiers
             .into_iter()
-            .flat_map(|i| modifiers.iter().map(|j| (i, j)))
+            .flat_map(|i| modifiers.iter().map(move |j| (i, j)))
             .find(|(i, j)| i == j)
             .is_some()
     }
@@ -1165,7 +1351,7 @@ where
 #[cfg(feature = "async")]
 impl<Dpy: DisplayLike> Dri3Drawable<Dpy>
 where
-    Dpy::Conn: AsyncConnection + Send,
+    Dpy::Connection: AsyncConnection + Send,
 {
     #[inline]
     pub async fn new_async(
@@ -1270,18 +1456,18 @@ impl Dri3Buffer {
         depth: u8,
     ) -> breadx::Result<Arc<Self>>
     where
-        Dpy::Conn: Connection,
+        Dpy::Connection: Connection,
     {
         // TODO: this function is absolutely massive, it's not even funny. break it up into smaller
         //       functions if we have a chance
 
         let xshmfence = xshmfence()?;
-        let alloc_shm: XshmfenceAllocShm = unsafe { xshmfence.symbol(&XSHMFENCE_ALLOC_SHM) }
+        let alloc_shm: XshmfenceAllocShm = unsafe { xshmfence.function(&XSHMFENCE_ALLOC_SHM) }
             .expect("xshmfence_alloc_shm not present");
-        let map_shm: XshmfenceMapShm =
-            unsafe { xshmfence.symbol(&XSHMFENCE_MAP_SHM) }.expect("xshmfence_map_shm not present");
+        let map_shm: XshmfenceMapShm = unsafe { xshmfence.function(&XSHMFENCE_MAP_SHM) }
+            .expect("xshmfence_map_shm not present");
         let unmap_shm: XshmfenceUnmapShm =
-            unsafe { xshmfence.symbol(&XSHMFENCE_UNMAP_SHM) }.expect("xshmfence_unmap_shm");
+            unsafe { xshmfence.function(&XSHMFENCE_UNMAP_SHM) }.expect("xshmfence_unmap_shm");
 
         // create an xshm object
         let fence_fd = unsafe { (alloc_shm)() };
@@ -1291,7 +1477,9 @@ impl Dri3Buffer {
 
         // we set up a variety of CallOnDrop objects that destroy the file descriptors if
         // the function errors out
-        let fd_guard = CallOnDrop::new(|| unsafe { libc::close(fence_fd) });
+        let fd_guard = CallOnDrop::new(|| unsafe {
+            libc::close(fence_fd);
+        });
 
         let shm_fence = unsafe { (map_shm)(fence_fd) };
         let shm_fence = match NonNull::new(shm_fence) {
@@ -1299,7 +1487,7 @@ impl Dri3Buffer {
             None => return Err(StaticMsg("Failed to map XSHM Fence")),
         };
 
-        let shm_guard = CallOnDrop::new(move || unsafe { (unmap_shm)(shm_fence) });
+        let shm_guard = CallOnDrop::new(move || unsafe { (unmap_shm)(shm_fence.as_ptr()) });
 
         let cpp = cpp_for_format(format).ok_or(StaticMsg("failed to find cpp for format"))?;
 
@@ -1307,12 +1495,12 @@ impl Dri3Buffer {
         // TODO: as far as I know, the memory isn't actually used for any loaders and the loader
         //       parameter is used mostly just in case we need to do it in the future. so that's what
         //       we do
-        let mut buffer = Arc::<MaybeUninit<Dri3Buffer>>::new_uninit();
+        let mut buffer = Arc::<Dri3Buffer>::new_uninit();
         let mut conn = drawable.display.display();
-        let screen = draw.screen();
+        let screen = drawable.screen();
 
         // we use the image extension pretty heavily up above
-        let image_ext = match unsafe { draw.screen().inner.image.as_ref() } {
+        let image_ext = match unsafe { drawable.screen().inner.image.as_ref() } {
             Some(r) => r,
             None => return Err(StaticMsg("No image extension!")),
         };
@@ -1321,18 +1509,23 @@ impl Dri3Buffer {
             let mut image = ptr::null_mut();
 
             // check to see if we can use modifiers
-            if draw.multiplanes_available
+            if drawable.multiplanes_available
                 && image_ext.base.version >= 15
                 && image_ext.queryDmaBufModifiers.is_some()
                 && image_ext.createImageWithModifiers.is_some()
             {
-                let x_modifiers = conn.get_supported_modifiers_immediate()?;
+                let mut x_modifiers = conn.get_supported_modifiers_immediate(
+                    drawable.x_drawable.xid,
+                    depth,
+                    cpp as u8 * 8,
+                )?;
                 let mut modifiers: Option<Vec<u64>> = None;
 
                 if !x_modifiers.window.is_empty() {
-                    if drawable
-                        .has_supported_modifier(image_format_to_fourcc(format), &x_modifiers.window)
-                    {
+                    if drawable.has_supported_modifier(
+                        image_format_to_fourcc(format) as _,
+                        &x_modifiers.window,
+                    ) {
                         modifiers = Some(mem::take(&mut x_modifiers.window));
                     }
                 }
@@ -1345,10 +1538,10 @@ impl Dri3Buffer {
                 if let Some(modifiers) = modifiers {
                     image = unsafe {
                         (image_ext.createImageWithModifiers.unwrap())(
-                            drawable.screen().dri_screen(),
+                            drawable.screen().dri_screen().as_ptr(),
                             width as _,
                             height as _,
-                            format,
+                            format as _,
                             modifiers.as_ptr(),
                             modifiers.len() as _,
                             buffer.as_ptr() as *const _ as *mut _,
@@ -1361,10 +1554,10 @@ impl Dri3Buffer {
             if image.is_null() {
                 image = unsafe {
                     (image_ext.createImage.expect("createImage not present"))(
-                        drawable.screen.dri_screen(),
+                        drawable.screen().dri_screen().as_ptr(),
                         width as _,
                         height as _,
-                        format,
+                        format as _,
                         ffi::__DRI_IMAGE_USE_SHARE
                             | ffi::__DRI_IMAGE_USE_SCANOUT
                             | ffi::__DRI_IMAGE_USE_BACKBUFFER,
@@ -1380,10 +1573,10 @@ impl Dri3Buffer {
             // create an image without making GPU assumptions
             let image = unsafe {
                 (image_ext.createImage.expect("createImage not present"))(
-                    drawable.screen.dri_screen(),
+                    drawable.screen().dri_screen().as_ptr(),
                     width as _,
                     height as _,
-                    format,
+                    format as _,
                     0,
                     buffer.as_ptr() as *const _ as *mut _,
                 )
@@ -1396,10 +1589,10 @@ impl Dri3Buffer {
 
             let linear_buffer = unsafe {
                 (image_ext.createImage.expect("createImage not present"))(
-                    drawable.screen.dri_screen(),
+                    drawable.screen().dri_screen().as_ptr(),
                     width as _,
                     height as _,
-                    draw.linear_format(format),
+                    linear_format(&mut *conn, format as _) as _,
                     ffi::__DRI_IMAGE_USE_SHARE
                         | ffi::__DRI_IMAGE_USE_LINEAR
                         | ffi::__DRI_IMAGE_USE_BACKBUFFER,
@@ -1410,7 +1603,7 @@ impl Dri3Buffer {
             let linear_buffer = match NonNull::new(linear_buffer) {
                 Some(linear_buffer) => linear_buffer,
                 None => {
-                    unsafe { (image_ext.destroyImage.unwrap())(image) };
+                    unsafe { (image_ext.destroyImage.unwrap())(image.as_ptr()) };
                     return Err(StaticMsg("createImage returned null"));
                 }
             };
@@ -1420,7 +1613,7 @@ impl Dri3Buffer {
 
         // destroy the images if we exit early
         let image_guard = CallOnDrop::new(|| {
-            let image_driver = unsafe { &*drawable.screen.inner.image };
+            let image_driver = unsafe { &*drawable.screen().inner.image };
             let destroy_image = image_driver.destroyImage.unwrap();
 
             unsafe { destroy_image(image.as_ptr()) };
@@ -1434,7 +1627,7 @@ impl Dri3Buffer {
         let plane_num = match unsafe {
             (image_ext.queryImage.unwrap())(
                 pixmap_buffer.as_ptr(),
-                ffi::__DRI_IMAGE_ATTRIB_NUM_PLANES,
+                ffi::__DRI_IMAGE_ATTRIB_NUM_PLANES as _,
                 plane_num.as_mut_ptr(),
             )
         } {
@@ -1442,23 +1635,24 @@ impl Dri3Buffer {
             _ => unsafe { plane_num.assume_init() },
         };
 
-        let mut buffer_fds: Vec<c_int> = iter::repeat(-1).take(4).collect();
+        let mut buffer_fds: Vec<Cell<c_int>> = iter::repeat(Cell::new(-1)).take(4).collect();
         let mut strides: [c_int; 4] = [0; 4];
         let mut offsets: [c_int; 4] = [0; 4];
         let buffer_guard = CallOnDrop::new(|| {
-            buffer_fds.iter().for_each(|fd| {
+            buffer_fds.iter().cloned().for_each(|fd| {
+                let fd = fd.get();
                 if fd != -1 {
                     unsafe { libc::close(fd) };
                 }
             });
         });
 
-        for i in 0..plane_num {
+        for i in 0..(plane_num as usize) {
             let cur_image = unsafe {
-                (image.fromPlanar.expect("fromPlanar not present"))(
+                (image_ext.fromPlanar.expect("fromPlanar not present"))(
                     pixmap_buffer.as_ptr(),
-                    i,
-                    ptr::null(),
+                    i as _,
+                    ptr::null_mut(),
                 )
             };
             let cur_image = match NonNull::new(cur_image) {
@@ -1469,30 +1663,33 @@ impl Dri3Buffer {
                 }
             };
 
+            let mut buffer_fd: c_int = -1;
             let mut ret = unsafe {
-                (image.queryImage.unwrap())(
+                (image_ext.queryImage.unwrap())(
                     cur_image.as_ptr(),
-                    ffi::__DRI_IMAGE_ATTRIB_FD,
-                    &mut buffer_fds[i],
+                    ffi::__DRI_IMAGE_ATTRIB_FD as _,
+                    &mut buffer_fd,
                 )
             };
+            buffer_fds[i].set(buffer_fd);
+
             ret &= unsafe {
-                (image.queryImage.unwrap())(
+                (image_ext.queryImage.unwrap())(
                     cur_image.as_ptr(),
-                    ffi::__DRI_IMAGE_ATTRIB_STRIDE,
+                    ffi::__DRI_IMAGE_ATTRIB_STRIDE as _,
                     &mut strides[i],
                 )
             };
             ret &= unsafe {
-                (image.queryImage.unwrap())(
+                (image_ext.queryImage.unwrap())(
                     cur_image.as_ptr(),
-                    ffi::__DRI_IMAGE_ATTRIB_OFFSET,
+                    ffi::__DRI_IMAGE_ATTRIB_OFFSET as _,
                     &mut offsets[i],
                 )
             };
 
             if cur_image != pixmap_buffer {
-                unsafe { (image.destroyImage.unwrap())(cur_image.as_ptr()) };
+                unsafe { (image_ext.destroyImage.unwrap())(cur_image.as_ptr()) };
             }
 
             if ret == 0 {
@@ -1502,17 +1699,17 @@ impl Dri3Buffer {
 
         let mut modifier_upper = MaybeUninit::<c_int>::uninit();
         let mut ret = unsafe {
-            (image.queryImage.unwrap())(
+            (image_ext.queryImage.unwrap())(
                 pixmap_buffer.as_ptr(),
-                ffi::__DRI_IMAGE_ATTRIB_MODIFIER_UPPER,
+                ffi::__DRI_IMAGE_ATTRIB_MODIFIER_UPPER as _,
                 modifier_upper.as_mut_ptr(),
             )
         };
         let mut modifier_lower = MaybeUninit::<c_int>::uninit();
         ret &= unsafe {
-            (image.queryImage.unwrap())(
+            (image_ext.queryImage.unwrap())(
                 pixmap_buffer.as_ptr(),
-                ffi::__DRI_IMAGE_ATTRIB_MODIFIER_LOWER,
+                ffi::__DRI_IMAGE_ATTRIB_MODIFIER_LOWER as _,
                 modifier_lower.as_mut_ptr(),
             )
         };
@@ -1522,22 +1719,36 @@ impl Dri3Buffer {
         } else {
             // SAFETY: if queryImage succeeded on both tries, both modifiers should contractually
             //         be fully init
-            let upper = unsafe { modifier_upper.assume_init() };
-            let lower = unsafe { modifier_lower.assume_init() };
-            (upper << 32) | (lower & 0xffffffff)
+            let upper = unsafe { modifier_upper.assume_init() } as u64;
+            let lower = unsafe { modifier_lower.assume_init() } as u64;
+            (upper << 32u64) | (lower & 0xffffffffu64)
         };
 
-        let pixmap = if drawable.has_multiplanes && modifer != DRM_CORRUPTED_MODIFIER {
+        // convert the strides and offsets array from c_int to u32
+        macro_rules! cvt_array {
+            ($arr: expr) => {
+                [
+                    $arr[0] as u32,
+                    $arr[1] as u32,
+                    $arr[2] as u32,
+                    $arr[3] as u32,
+                ]
+            };
+        }
+        let strides = cvt_array!(strides);
+        let offsets = cvt_array!(offsets);
+
+        let pixmap = if drawable.multiplanes_available && modifier != DRM_CORRUPTED_MODIFIER {
             conn.pixmap_from_buffers(
                 Window::const_from_xid(drawable.window.load(Ordering::Acquire)),
-                depth,
                 width,
                 height,
+                depth,
                 strides,
                 offsets,
-                cpp * 8,
-                modifiers,
-                buffer_fds,
+                (cpp as u8) * 8,
+                modifier,
+                buffer_fds.iter().map(|t| t.get()).collect(),
             )?
         } else {
             conn.pixmap_from_buffer(
@@ -1547,8 +1758,8 @@ impl Dri3Buffer {
                 height,
                 strides[0] as _,
                 depth,
-                cpp * 8,
-                buffer_fds[0],
+                (cpp as u8) * 8,
+                buffer_fds[0].get(),
             )?
         };
 
@@ -1560,9 +1771,9 @@ impl Dri3Buffer {
         // create the object proper
         unsafe {
             ptr::write(
-                Arc::get_mut(&mut buffer)
-                    .expect("Infallible Arc::get_mut()")
-                    .as_mut_ptr(),
+                MaybeUninit::as_mut_ptr(
+                    Arc::get_mut(&mut buffer).expect("Infallible Arc::get_mut()"),
+                ),
                 Dri3Buffer {
                     image,
                     linear_buffer,
@@ -1574,6 +1785,9 @@ impl Dri3Buffer {
                     modifier,
                     reallocate: false,
                     busy: 0,
+                    width,
+                    height,
+                    last_swap: AtomicU64::new(0),
                 },
             )
         };
@@ -1583,7 +1797,10 @@ impl Dri3Buffer {
     /// Free the renderbuffer's data. This isn't done in a drop handle because we need the reference to
     /// the Dri3Drawable (and also because we block).
     #[inline]
-    fn free<Dpy: DisplayLike>(self, drawable: &Dri3Drawable<Dpy>) -> breadx::Result {
+    fn free<Dpy: DisplayLike>(mut self, drawable: &Dri3Drawable<Dpy>) -> breadx::Result
+    where
+        Dpy::Connection: Connection,
+    {
         let mut conn = drawable.display.display();
         if self.own_pixmap {
             self.pixmap.free(&mut conn)?;
@@ -1593,12 +1810,12 @@ impl Dri3Buffer {
         conn.free_sync_fence(self.sync_fence)?;
         // free the shm fence
         let xshmfence = xshmfence()?;
-        let unmap_shm: XshmfenceUnmapShm = unsafe { xshmfence.symbol(&XSHMFENCE_UNMAP_SHM) }
+        let unmap_shm: XshmfenceUnmapShm = unsafe { xshmfence.function(&XSHMFENCE_UNMAP_SHM) }
             .ok_or(StaticMsg("Failed to load xshmfence_unmap_shm"))?;
-        unsafe { unmap_shm(self.sfm_fence as *mut _) };
+        unsafe { unmap_shm(self.shm_fence.as_ptr() as *mut _) };
 
         // destroy the buffers
-        let image_ext = unsafe { &*self.screen.inner.image };
+        let image_ext = unsafe { &*drawable.screen().inner.image };
         unsafe { (image_ext.destroyImage.expect("destroyImage not present"))(self.image.as_ptr()) };
         if let Some(linear_buffer) = self.linear_buffer.take() {
             unsafe { (image_ext.destroyImage.unwrap())(linear_buffer.as_ptr()) };
@@ -1611,9 +1828,10 @@ impl Dri3Buffer {
 }
 
 #[inline]
-fn get_adaptive_sync_and_vblank_mode<Dpy: DisplayLike>(
-    screen: &Dri3Screen<Dpy>,
-) -> (c_uchar, c_int) {
+fn get_adaptive_sync_and_vblank_mode<Dpy: DisplayLike>(screen: &Dri3Screen<Dpy>) -> (c_uchar, c_int)
+where
+    Dpy::Connection: Connection,
+{
     let mut adaptive_sync: c_uchar = 0;
     let mut vblank_mode: c_int = VBLANK_DEF_INTERVAL1;
     if !screen.inner.config.is_null() {
@@ -1642,7 +1860,10 @@ fn create_the_drawable<Dpy: DisplayLike>(
     screen: &Dri3Screen<Dpy>,
     config: &GlConfig,
     drawable: *const c_void,
-) -> breadx::Result<DriDrawablePtr> {
+) -> breadx::Result<DriDrawablePtr>
+where
+    Dpy::Connection: Connection,
+{
     let config = match screen.driconfig_from_fbconfig(&config) {
         Some(config) => config.as_ptr(),
         None => {
@@ -1667,42 +1888,41 @@ fn create_the_drawable<Dpy: DisplayLike>(
 }
 
 #[inline]
-fn buffer_from_pixmap<Dpy>(
+fn image_from_buffer<Dpy>(
     screen: &Dri3Screen<Dpy>,
-    width: u16,
-    height: u16,
-    mut stride: u32,
     format: c_uint,
-    fds: Vec<c_int>,
+    mut bfp: BufferFromPixmapReply,
     dri_screen: ThreadSafe<*mut ffi::__DRIscreen>,
     loader: ThreadSafe<*const ()>,
 ) -> breadx::Result<ThreadSafe<NonNull<ffi::__DRIimage>>> {
     let mut offset = 0;
+    let mut stride = bfp.stride as c_int;
 
     // createImageFromFds
     let image_planar = unsafe {
         ((&*screen.inner.image).createImageFromFds.unwrap())(
-            dri_screen.0,
-            width,
-            height,
+            dri_screen.into_inner(),
+            bfp.width as _,
+            bfp.height as _,
             image_format_to_fourcc(format),
-            fds.as_ptr() as *const _,
+            bfp.pixmap_fd.as_mut_ptr() as *mut _,
             1,
             &mut stride,
             &mut offset,
-            loader.0 as *mut _,
+            loader.into_inner() as *mut _,
         )
     };
-    unsafe { libc::close(fds[0]) };
+    unsafe { libc::close(bfp.pixmap_fd[0]) };
 
     if image_planar.is_null() {
         return Err(StaticMsg("Failed to create image from fd"));
     }
 
     let ret = unsafe {
-        ((&*screen.inner.image).fromPlanar.unwrap())(image_planar, 0, loader.0 as *mut _)
+        ((&*screen.inner.image).fromPlanar.unwrap())(image_planar, 0, loader.into_inner() as *mut _)
     };
     match NonNull::new(ret) {
+        // SAFETY: __DRIimage is thread safe if I recall correctly
         Some(ret) => Ok(unsafe { ThreadSafe::new(ret) }),
         None => unsafe {
             ((&*screen.inner.image).destroyImage.unwrap())(image_planar);
@@ -1712,19 +1932,65 @@ fn buffer_from_pixmap<Dpy>(
 }
 
 #[inline]
-fn buffers_from_pixmap<Dpy>(
+fn image_from_buffers<Dpy>(
     screen: &Dri3Screen<Dpy>,
-    width: u16,
-    height: u16,
-    mut strides: Vec<u32>,
+    format: c_uint,
+    mut bfp: BuffersFromPixmapReply,
+    dri_screen: ThreadSafe<*mut ffi::__DRIscreen>,
+    loader: ThreadSafe<*const ()>,
 ) -> breadx::Result<ThreadSafe<NonNull<ffi::__DRIimage>>> {
+    let mut strides: [c_int; 4] = bfp
+        .strides
+        .iter()
+        .map(|i| *i as c_int)
+        .take(4)
+        .collect::<ArrayVec<[c_int; 4]>>()
+        .into_inner();
+    let mut offsets: [c_int; 4] = bfp
+        .offsets
+        .iter()
+        .map(|i| *i as c_int)
+        .take(4)
+        .collect::<ArrayVec<[c_int; 4]>>()
+        .into_inner();
+    let mut error: MaybeUninit<c_uint> = MaybeUninit::uninit();
+
+    let ret = unsafe {
+        ((&*screen.inner.image).createImageFromDmaBufs2.unwrap())(
+            dri_screen.into_inner(),
+            bfp.width as _,
+            bfp.height as _,
+            image_format_to_fourcc(format),
+            bfp.modifier,
+            bfp.buffers.as_mut_ptr(), // SAFETY: shouldn't actually modify the buffers
+            bfp.nfd as _,
+            strides.as_mut_ptr(),
+            offsets.as_mut_ptr(),
+            0,
+            0,
+            0,
+            0,
+            error.as_mut_ptr(),
+            loader.into_inner() as *mut _,
+        )
+    };
+
+    // close all of our fds
+    bfp.buffers.iter().for_each(|fd| unsafe {
+        libc::close(*fd);
+    });
+
+    match NonNull::new(ret) {
+        Some(ret) => Ok(unsafe { ThreadSafe::new(ret) }),
+        None => Err(StaticMsg("Failed to create image from buffers")),
+    }
 }
 
 #[inline]
 fn set_fence(fence: NonNull<c_void>) {
     let xshmfence = xshmfence().expect("Failed to load xshmfence"); // should be infallible
     let trigger: XshmfenceTrigger =
-        unsafe { xshmfence.symbol(&*XSHMFENCE_TRIGGER) }.expect("xshmfence_trigger not found");
+        unsafe { xshmfence.function(&*XSHMFENCE_TRIGGER) }.expect("xshmfence_trigger not found");
     unsafe { (trigger)(fence.as_ptr()) };
 }
 
@@ -1732,39 +1998,39 @@ fn set_fence(fence: NonNull<c_void>) {
 fn reset_fence(fence: NonNull<c_void>) {
     let xshmfence = xshmfence().expect("Infallible!");
     let reset: XshmfenceReset =
-        unsafe { xshmfence.symbol(&*XSHMFENCE_RESET) }.expect("xshmfence_reset found found");
+        unsafe { xshmfence.function(&*XSHMFENCE_RESET) }.expect("xshmfence_reset found found");
     unsafe { (reset)(fence.as_ptr()) };
 }
 
 #[inline]
 fn trigger_fence<Dpy: DisplayLike>(
-    conn: &mut Display<Dpy::Conn>,
+    conn: &mut Display<Dpy::Connection>,
     fence: Fence,
 ) -> breadx::Result<()>
 where
-    Dpy::Conn: Connection,
+    Dpy::Connection: Connection,
 {
     conn.trigger_fence(fence)
 }
 
 #[inline]
 fn block_on_fence<Dpy: DisplayLike>(
-    conn: &mut Display<Dpy::Conn>,
+    conn: &mut Display<Dpy::Connection>,
     drawable: Option<&Dri3Drawable<Dpy>>,
     buffer: &Dri3Buffer,
 ) -> breadx::Result<()>
 where
-    Dpy::Conn: Connection,
+    Dpy::Connection: Connection,
 {
     let xshmfence = xshmfence().expect("Infallible!");
     let xawait: XshmfenceAwait =
-        unsafe { xshmfence.symbol(&*XSHMFENCE_AWAIT) }.expect("xshmfence_await not found");
+        unsafe { xshmfence.function(&*XSHMFENCE_AWAIT) }.expect("xshmfence_await not found");
     unsafe { (xawait)(buffer.shm_fence.as_ptr()) };
 
     if let Some(drawable) = drawable {
         let mut guard = drawable.state();
         let mut conn = drawable.display.display();
-        self.process_present_events(&mut *conn, &mut *guard)?;
+        drawable.process_present_events(&mut *conn, &mut *guard)?;
     }
 
     Ok(())
@@ -1779,19 +2045,19 @@ unsafe impl Sync for DriDrawablePtr {}
 const VARIABLE_REFRESH: &str = "_VARAIBLE_REFRESH";
 
 #[inline]
-fn free_buffer_arc<Dpy: DisplayLike>(
+pub fn free_buffer_arc<Dpy: DisplayLike>(
     buffer: Arc<Dri3Buffer>,
     draw: &Dri3Drawable<Dpy>,
 ) -> breadx::Result<()>
 where
-    Dpy::Conn: Connection,
+    Dpy::Connection: Connection,
 {
     let mut bufarc = Some(buffer);
     'tryunwraploop: loop {
         match Arc::try_unwrap(bufarc.take().unwrap()) {
             Ok(buffer) => {
                 buffer.free(draw)?;
-                break 'tryunwraploop;
+                break 'tryunwraploop Ok(());
             }
             Err(buffer) => {
                 log::error!("Hopefully infallible Arc::try_unwrap() failed.");
@@ -1825,6 +2091,43 @@ fn set_adaptive_sync<Conn: Connection>(
     } else {
         window.delete_property(dpy, variable_refresh)
     }
+}
+
+#[inline]
+fn linear_format<Conn>(dpy: &mut Display<Conn>, format: u32) -> u32 {
+    match format {
+        ffi::__DRI_IMAGE_FORMAT_XRGB2101010 | ffi::__DRI_IMAGE_FORMAT_XBGR2101010 => {
+            if red_mask_for_depth(dpy, 30) == 0x3ff {
+                ffi::__DRI_IMAGE_FORMAT_XBGR2101010
+            } else {
+                ffi::__DRI_IMAGE_FORMAT_XRGB2101010
+            }
+        }
+        ffi::__DRI_IMAGE_FORMAT_ARGB2101010 | ffi::__DRI_IMAGE_FORMAT_ABGR2101010 => {
+            if red_mask_for_depth(dpy, 30) == 0x3ff {
+                ffi::__DRI_IMAGE_FORMAT_ABGR2101010
+            } else {
+                ffi::__DRI_IMAGE_FORMAT_ARGB2101010
+            }
+        }
+        format => format,
+    }
+}
+
+#[inline]
+fn red_mask_for_depth<Conn>(dpy: &mut Display<Conn>, depth: u8) -> c_uint {
+    dpy.setup()
+        .roots
+        .iter()
+        .flat_map(|s| s.allowed_depths.iter())
+        .find_map(|d| {
+            if d.depth == depth {
+                Some(d.visuals.first()?.red_mask as _)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0)
 }
 
 #[cfg(feature = "async")]
@@ -1872,7 +2175,7 @@ const fn cpp_for_format(format: c_uint) -> Option<u32> {
 }
 
 #[inline]
-const fn image_format_to_fourcc(format: c_int) -> c_int {
+const fn image_format_to_fourcc(format: c_uint) -> c_int {
     #[inline]
     const fn fourcc_code(a: char, b: char, c: char, d: char) -> c_int {
         // should be translated into a compile error
@@ -1894,11 +2197,11 @@ const fn image_format_to_fourcc(format: c_int) -> c_int {
 
     match format {
         // __DRI_IMAGE_FORMAT_SARGB8
-        4107 => ffi::__DRI_IMAGE_FOURCC_SARGB8888,
+        4107 => ffi::__DRI_IMAGE_FOURCC_SARGB8888 as _,
         // __DRI_IMAGE_FORMAT_SABGR8
-        4114 => ffi::__DRI_IMAGE_FOURCC_SABGR8888,
+        4114 => ffi::__DRI_IMAGE_FOURCC_SABGR8888 as _,
         // __DRI_IMAGE_FORMAT_SXRGB8
-        4118 => ffi::__DRI_IMAGE_FOURCC_SXRGB8888,
+        4118 => ffi::__DRI_IMAGE_FOURCC_SXRGB8888 as _,
         // __DRI_IMAGE_FORMAT_RGB565,
         4097 => DRM_FORMAT_RGB565,
         // __DRI_IMAGE_FORMAT_XRGB8888
@@ -1936,17 +2239,5 @@ impl Drop for Dri3Buffer {
     #[inline]
     fn drop(&mut self) {
         log::error!("Dropping a Dri3Buffer! This should never happen! Should use free()!");
-    }
-}
-
-#[repr(transparent)]
-struct ThreadSafe<T>(T);
-unsafe impl<T> Send for ThreadSafe<T> {}
-unsafe impl<T> Sync for ThreadSafe<T> {}
-
-impl<T> ThreadSafe<T> {
-    #[inline]
-    unsafe fn new(val: T) -> Self {
-        Self(val)
     }
 }

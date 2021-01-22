@@ -25,24 +25,24 @@ impl<Dpy> fmt::Debug for Dri2Display<Dpy> {
 
 impl<Dpy: DisplayLike> Dri2Display<Dpy> {
     #[inline]
-    pub(crate) fn new(dpy: &mut Display<Dpy::Conn>) -> breadx::Result<Self> {
+    pub(crate) fn new(dpy: &mut Display<Dpy::Connection>) -> breadx::Result<Self> {
         unimplemented!()
     }
 
     #[inline]
-    pub(crate) async fn new_async(dpy: &mut Display<Dpy::Conn>) -> breadx::Result<Self> {
+    pub(crate) async fn new_async(dpy: &mut Display<Dpy::Connection>) -> breadx::Result<Self> {
         unimplemented!()
     }
 }
 
 impl<Dpy: DisplayLike> GlInternalDisplay<Dpy> for Dri2Display<Dpy>
 where
-    Dpy::Conn: Connection,
+    Dpy::Connection: Connection,
 {
     #[inline]
     fn create_screen(
         &self,
-        dpy: &mut Display<Dpy::Conn>,
+        dpy: &mut Display<Dpy::Connection>,
         index: usize,
     ) -> breadx::Result<GlScreen<Dpy>> {
         unimplemented!()
@@ -52,12 +52,12 @@ where
 #[cfg(feature = "async")]
 impl<Dpy: DisplayLike> AsyncGlInternalDisplay<Dpy> for Dri2Display<Dpy>
 where
-    Dpy::Conn: AsyncConnection + Send,
+    Dpy::Connection: AsyncConnection + Send,
 {
     #[inline]
     fn create_screen_async<'future, 'a, 'b>(
         &'a self,
-        dpy: &'b mut Display<Dpy::Conn>,
+        dpy: &'b mut Display<Dpy::Connection>,
         index: usize,
     ) -> GenericFuture<'future, breadx::Result<GlScreen<Dpy>>>
     where

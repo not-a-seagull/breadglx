@@ -20,7 +20,7 @@ pub struct Dri2Context<Dpy> {
 
 impl<Dpy: DisplayLike> GlInternalContext<Dpy> for Dri2Context<Dpy>
 where
-    Dpy::Conn: Connection,
+    Dpy::Connection: Connection,
 {
     #[inline]
     fn bind(
@@ -41,7 +41,7 @@ where
 #[cfg(feature = "async")]
 impl<Dpy: DisplayLike> AsyncGlInternalContext<Dpy> for Dri3Context<Dpy>
 where
-    Dpy::Conn: AsyncConnection + Send,
+    Dpy::Connection: AsyncConnection + Send,
 {
     #[inline]
     fn bind_async<'future, 'a, 'b>(

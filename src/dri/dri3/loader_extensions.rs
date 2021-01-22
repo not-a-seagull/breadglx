@@ -2,13 +2,19 @@
 
 use crate::{
     display::DisplayLike,
-    dri::{dri3::Dri3Drawable, ffi, ExtensionContainer},
+    dri::{
+        dri3::{free_buffer_arc, BufferType, Dri3Drawable, MAX_BACK},
+        ffi, ExtensionContainer,
+    },
 };
 use breadx::display::Connection;
 use std::{
+    mem,
     os::raw::{c_int, c_uint, c_void},
     panic::catch_unwind,
+    process::abort,
     ptr::{self, raw_mut},
+    sync::Arc,
 };
 
 #[cfg(feature = "async")]
@@ -25,28 +31,74 @@ unsafe extern "C" fn get_buffers<Dpy: DisplayLike>(
     format: c_uint,
     stamp: *mut u32,
     loader: *mut c_void,
-    buffer_mask: u32,
+    mut buffer_mask: u32,
     buffers: *mut ffi::__DRIimageList,
-) -> c_int {
+) -> c_int
+where
+    Dpy::Connection: Connection,
+{
     // write some of our initial values to the buffers variable
     ptr::write(raw_mut!((*buffers).image_mask), 0);
     ptr::write(raw_mut!((*buffers).front), ptr::null_mut());
     ptr::write(raw_mut!((*buffers).back), ptr::null_mut());
 
-    // "loader" should be a *const Dri3Drawable, let's load that
-    let drawable = &*(loader as *const c_void as *const Dri3Drawable<Dpy>);
-
     // wrap the rest of this function in a catch_unwind, it is very unsafe to pass a panic across
     // the FFI boundary
     match catch_unwind::<_, breadx::Result<c_int>>(move || {
-        drawable.update();
+        log::debug!("Entering scope for get_buffers panic catcher");
+
+        // SAFETY: "loader" should semantically be an Arc<Dri3Drawable<Dpy>>. Here, we increment the reference
+        //         count and return an Arc
+        let drawable = Arc::from_raw(loader as *const c_void as *const Dri3Drawable<Dpy>);
+        // SAFETY: Since the only copies of this function that exist are the one in the map
+        //         and the one here, and the reference count would logically only read as "1",
+        //         we need to create a dummy copy of the drawable so that other threads know
+        //         we're using it
+        mem::forget(drawable.clone());
+
+        drawable.update()?;
         drawable.update_max_back();
 
-        Ok(0)
+        // free back buffers we no longer need
+        drawable.free_back_buffers()?;
+        if drawable.is_pixmap() || drawable.swap_method() == ffi::__DRI_ATTRIB_SWAP_EXCHANGE as _ {
+            buffer_mask |= ffi::__DRI_IMAGE_BUFFER_FRONT as u32;
+        }
+
+        let buffers = unsafe { &mut *buffers };
+
+        if buffer_mask & ffi::__DRI_IMAGE_BUFFER_FRONT as u32 == 0 {
+            // we don't need a front buffer
+            drawable.free_buffers(BufferType::Front)?;
+            drawable.set_have_fake_front(false);
+        } else {
+            let not_fake_front = drawable.is_pixmap() && !drawable.is_different_gpu();
+            let buffer = if not_fake_front {
+                drawable.get_pixmap_buffer(BufferType::Front, format)?
+            } else {
+                drawable.get_buffer(BufferType::Front, format)?
+            };
+
+            buffers.image_mask |= ffi::__DRI_IMAGE_BUFFER_FRONT as u32;
+            buffers.front = buffer.image.as_ptr();
+            drawable.set_have_fake_front(!not_fake_front);
+        }
+
+        if buffer_mask & ffi::__DRI_IMAGE_BUFFER_BACK as u32 == 0 {
+            drawable.free_buffers(BufferType::Back)?;
+            drawable.set_have_back(false);
+        } else {
+            let back = drawable.get_buffer(BufferType::Back, format)?;
+            drawable.set_have_back(true);
+            buffers.image_mask |= ffi::__DRI_IMAGE_BUFFER_BACK as u32;
+            buffers.back = back.image.as_ptr();
+        }
+
+        Ok(1)
     }) {
         Err(_) => {
             log::error!("get_buffers panicked during catch_unwind!");
-            0
+            abort()
         }
         Ok(Err(e)) => {
             log::error!("get_buffers resolved to error: {}", e);
@@ -83,7 +135,7 @@ struct LoaderExtensions<Dpy>(Dpy);
 
 impl<Dpy: DisplayLike> LoaderExtensions<Dpy>
 where
-    Dpy::Conn: Connection,
+    Dpy::Connection: Connection,
 {
     // Loader extensions
     const IMAGE_LOADER_EXTENSION: ffi::__DRIimageLoaderExtension = ffi::__DRIimageLoaderExtension {
@@ -128,7 +180,7 @@ where
 #[cfg(feature = "async")]
 impl<Dpy: DisplayLike> LoaderExtensions<Dpy>
 where
-    Dpy::Conn: AsyncConnection + Send,
+    Dpy::Connection: AsyncConnection + Send,
 {
     // Loader extensions
     const IMAGE_LOADER_EXTENSION_ASYNC: ffi::__DRIimageLoaderExtension =
@@ -173,7 +225,7 @@ where
 
 pub(crate) fn loader_extensions<Dpy: DisplayLike>() -> &'static [ExtensionContainer; 4]
 where
-    Dpy::Conn: Connection,
+    Dpy::Connection: Connection,
 {
     LoaderExtensions::<Dpy>::LOADER_EXTENSIONS
 }
@@ -181,7 +233,7 @@ where
 #[cfg(feature = "async")]
 pub(crate) fn loader_extensions_async<Dpy: DisplayLike>() -> &'static [ExtensionContainer; 4]
 where
-    Dpy::Conn: AsyncConnection + Send,
+    Dpy::Connection: AsyncConnection + Send,
 {
     LoaderExtensions::<Dpy>::LOADER_EXTENSIONS_ASYNC
 }
