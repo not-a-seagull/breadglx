@@ -1236,8 +1236,8 @@ where
             self.is_initialized.store(true, Ordering::Release);
 
             // activate checked mode if we haven't already
-//            let old_checked = conn.checked();
-//            conn.set_checked(true);
+            //            let old_checked = conn.checked();
+            //            conn.set_checked(true);
 
             // now that we have a lock, create an EID that represents the
             // special event selection
@@ -1295,7 +1295,7 @@ where
             self.width.store(geometry.width, Ordering::Relaxed);
             self.height.store(geometry.height, Ordering::Relaxed);
 
-//            conn.set_checked(old_checked);
+            //            conn.set_checked(old_checked);
         }
 
         if self.process_present_events(&mut conn, &mut guard)? {

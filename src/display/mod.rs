@@ -25,6 +25,8 @@ use futures_lite::future;
 
 mod dispatch;
 
+pub(crate) use dispatch::DisplayDispatch;
+
 /// Things that can go inside of a GlDisplay. Since it is shoved into a static variable
 /// at one point, it needs to be Send + Sync + 'static.
 pub trait DisplayLike = DpyLikeBase + Send + Sync + 'static;
@@ -119,6 +121,23 @@ pub(crate) trait AsyncGlInternalDisplay<Dpy: DisplayLike> {
     where
         'a: 'future,
         'b: 'future;
+}
+
+impl<Dpy> GlDisplay<Dpy> {
+    #[inline]
+    pub fn major_version(&self) -> u32 {
+        self.inner.major_version
+    }
+
+    #[inline]
+    pub fn minor_version(&self) -> u32 {
+        self.inner.minor_version
+    }
+
+    #[inline]
+    pub(crate) fn dispatch(&self) -> &dispatch::DisplayDispatch<Dpy> {
+        &self.inner.context
+    }
 }
 
 impl<Dpy: DisplayLike> GlDisplay<Dpy> {
@@ -221,6 +240,11 @@ where
 
         // get the major and minor version
         let (major_version, minor_version) = dpy.display_mut().query_glx_version_immediate(1, 1)?;
+        if major_version != 1 || minor_version < 1 {
+            return Err(breadx::BreadError::StaticMsg(
+                "breadglx is not compatible with GLX v1.0",
+            ));
+        }
 
         let mut context: Option<dispatch::DisplayDispatch<Dpy>> = None;
 

@@ -41,6 +41,28 @@ impl<Dpy> fmt::Debug for Dri3Display<Dpy> {
     }
 }
 
+impl<Dpy> Dri3Display<Dpy> {
+    #[inline]
+    pub fn dri3_version_major(&self) -> u32 {
+        self.dri3_version_major
+    }
+
+    #[inline]
+    pub fn dri3_version_minor(&self) -> u32 {
+        self.dri3_version_minor
+    }
+
+    #[inline]
+    pub fn present_version_major(&self) -> u32 {
+        self.present_version_major
+    }
+
+    #[inline]
+    pub fn present_version_minor(&self) -> u32 {
+        self.present_version_minor
+    }
+}
+
 impl<Dpy: DisplayLike> Dri3Display<Dpy>
 where
     Dpy::Connection: Connection,

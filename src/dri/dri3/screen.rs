@@ -5,7 +5,7 @@ use crate::{
     config::{GlConfig, GLX_FBCONFIG_ID},
     context::{dispatch::ContextDispatch, GlContext, GlContextRule, InnerGlContext},
     cstr::{const_cstr, ConstCstr},
-    display::{DisplayLike, GlDisplay},
+    display::{DisplayDispatch, DisplayLike, GlDisplay},
     dll::Dll,
     dri::{config, ffi, load},
     screen::GlInternalScreen,
@@ -445,9 +445,19 @@ where
                         })
                         .ok_or(breadx::BreadError::StaticMsg("Failed to find FbConfig ID"))?,
                 };
-                let has_multiplane = match unsafe { self.inner.image.as_ref() } {
-                    Some(image) => image.base.version >= 15,
-                    None => false,
+
+                // SAFETY: the pointer is in a C struct which is guaranteed to be well-aligned and
+                //         point to a valid object if it isn't null
+                let has_multiplane = match (unsafe { self.inner.image.as_ref() }, dpy.dispatch()) {
+                    (Some(image), DisplayDispatch::Dri3(d3)) => {
+                        image.base.version >= 15
+                            && (d3.dri3_version_major() > 1
+                                || (d3.dri3_version_major() == 1 && d3.dri3_version_minor() >= 2))
+                            && (d3.present_version_major() > 1
+                                || (d3.present_version_major() == 1
+                                    && d3.present_version_minor() >= 2))
+                    }
+                    _ => false,
                 };
 
                 let d = Dri3Drawable::new(
