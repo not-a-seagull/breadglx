@@ -32,6 +32,7 @@ use std::{
     hint, iter,
     mem::{self, MaybeUninit},
     num::NonZeroU64,
+    ops::{Deref, DerefMut},
     os::raw::{c_int, c_uchar, c_uint},
     pin::Pin,
     ptr::{self, NonNull},
@@ -154,6 +155,50 @@ struct SwapBufferCount {
     sbc: i64,
 }
 
+/// Simple wrapper around a MutexGuard<DrawableState> that logs a message on drop.
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct StateGuard<'a> {
+    #[cfg(not(feature = "async"))]
+    inner: Option<sync::MutexGuard<'a, DrawableState>>,
+    #[cfg(Feature = "async")]
+    inner: Option<async_lock::MutexGuard<'a, DrawableState>>,
+}
+
+impl<'a> StateGuard<'a> {
+    #[cfg(not(feature = "async"))]
+    #[inline]
+    fn into_inner(mut self) -> sync::MutexGuard<'a, DrawableState> {
+        log::trace!("Dropping lock for condvar");
+        let inner = self.inner.take().unwrap();
+        mem::forget(self);
+        inner
+    }
+}
+
+impl<'a> Deref for StateGuard<'a> {
+    type Target = DrawableState;
+
+    #[inline]
+    fn deref(&self) -> &DrawableState {
+        &*self.inner.as_ref().unwrap()
+    }
+}
+
+impl<'a> DerefMut for StateGuard<'a> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut DrawableState {
+        &mut *self.inner.as_mut().unwrap()
+    }
+}
+
+impl<'a> Drop for StateGuard<'a> {
+    #[inline]
+    fn drop(&mut self) {
+        log::trace!("Dropped state guard");
+    }
+}
+
 unsafe impl<Dpy: Send> Send for Dri3Drawable<Dpy> {}
 unsafe impl<Dpy: Sync> Sync for Dri3Drawable<Dpy> {}
 unsafe impl Send for DrawableState {}
@@ -231,7 +276,7 @@ impl BlitContext {
 
     #[cfg(feature = "async")]
     #[inline]
-    async fn free_async(self) {
+    fn free_async(self) -> impl Future<Output = ()> {
         blocking::unblock(move || self.free())
     }
 }
@@ -518,46 +563,45 @@ impl<Dpy> Dri3Drawable<Dpy> {
     }
 
     #[inline]
-    fn state(&self) -> MutexGuard<'_, DrawableState> {
+    fn state(&self) -> StateGuard<'_> {
+        log::trace!("Creating state lock for drawable");
+
         cfg_if::cfg_if! {
             if #[cfg(feature = "async")] {
-                future::block_on(self.state.lock())
+                StateGuard { inner: Some(future::block_on(self.state.lock())) }
             } else {
-                self.state.lock().expect(STATE_LOCK_FAILED)
+                StateGuard { inner: Some(self.state.lock().expect(STATE_LOCK_FAILED)) }
             }
         }
     }
 
     #[cfg(feature = "async")]
     #[inline]
-    async fn state_async(&self) -> MutexGuard<'_, DrawableState> {
-        self.state.lock().await
+    async fn state_async(&self) -> StateGuard<'_> {
+        StateGuard {
+            inner: Some(self.state.lock().await),
+        }
     }
 
     #[inline]
-    fn event_wait<'a>(
-        &'a self,
-        guard: MutexGuard<'a, DrawableState>,
-    ) -> MutexGuard<'a, DrawableState> {
+    fn event_wait<'a>(&'a self, guard: StateGuard<'a>) -> StateGuard<'a> {
         cfg_if::cfg_if! {
             if #[cfg(feature = "async")] {
                 mem::drop(guard);
                 self.event_waiter.listen().wait();
                 future::block_on(self.state.lock())
             } else {
-                self.event_waiter
+                let guard = guard.into_inner();
+                StateGuard { inner: Some(self.event_waiter
                     .wait(guard)
-                    .expect("Failed to wait for present events")
+                    .expect("Failed to wait for present events")) }
             }
         }
     }
 
     #[cfg(feature = "async")]
     #[inline]
-    async fn event_wait_async(
-        &self,
-        guard: MutexGuard<'_, DrawableState>,
-    ) -> MutexGuard<'_, DrawableState> {
+    async fn event_wait_async(&self, guard: StateGuard<'_>) -> StateGuard<'_> {
         mem::drop(guard);
         self.event_waiter.listen().await;
         self.state.lock().await
@@ -692,12 +736,14 @@ where
     #[inline]
     fn wait_for_event<'a, 'b>(
         &'a self,
-        state_lock: &'b mut Option<MutexGuard<'a, DrawableState>>,
+        state_lock: &'b mut Option<StateGuard<'a>>,
     ) -> breadx::Result<()>
     where
         'a: 'b,
     {
-        if self.has_event_waiter.load(Ordering::SeqCst) {
+        log::trace!("Beginning wait for present event...");
+
+        let res = if self.has_event_waiter.load(Ordering::SeqCst) {
             // another thread is polling for events for this drawable, wait a minute
             let sl = state_lock.take().expect("Non-exclusive lock?!?!");
             *state_lock = Some(self.event_wait(sl));
@@ -719,7 +765,10 @@ where
             }
 
             Ok(())
-        }
+        };
+
+        log::trace!("Ending wait for present event...");
+        res
     }
 
     #[inline]
@@ -739,6 +788,7 @@ where
             self.wait_for_event(&mut state)?;
         }
 
+        // we're good panicking here, we abort on panic anyways
         let state = state.expect("Shouldn't ever happen (unless we've somehow panicked!)!");
         Ok(SwapBufferCount {
             ust: state.ust,
@@ -758,7 +808,7 @@ where
     fn find_back<'a, 'b>(
         &'a self,
         mut conn: DisplayLock<'_, Dpy>,
-        state: &'b mut Option<MutexGuard<'a, DrawableState>>,
+        state: &'b mut Option<StateGuard<'a>>,
     ) -> breadx::Result<usize>
     where
         'a: 'b,
@@ -926,47 +976,74 @@ where
         // rellocate it
         let width = self.width.load(Ordering::SeqCst);
         let height = self.height.load(Ordering::SeqCst);
-        let mut state: Option<MutexGuard<'a, DrawableState>> = Some(self.state());
+        let mut state: Option<StateGuard<'a>> = None;
         let mut fence_await = false;
 
-        let mut create_new_buffer = move |state: &mut Option<MutexGuard<'a, DrawableState>>| -> breadx::Result<Arc<Dri3Buffer>> {
-            // create a new buffer
-            let mut new_buffer = Dri3Buffer::new(
-                self,
-                format,
-                width,
-                height,
-                self.depth.load(Ordering::SeqCst),
-            )?;
+        let mut create_new_buffer =
+            move |state: &mut Option<StateGuard<'a>>| -> breadx::Result<Arc<Dri3Buffer>> {
+                // create a new buffer
+                let mut new_buffer = Dri3Buffer::new(
+                    self,
+                    format,
+                    width,
+                    height,
+                    self.depth.load(Ordering::SeqCst),
+                )?;
 
-            let mut conn = self.display.display();
-            *state = Some(self.state());
+                let mut conn = self.display.display();
+                if state.is_none() {
+                    *state = Some(self.state());
+                }
 
-            let buffer = state.as_mut().unwrap().buffers[buf_id].take();
-            if buffer.is_some()
-                && (!matches!(buffer_type, BufferType::Front)
-                    || self.has_fake_front.load(Ordering::Acquire))
-            {
-                let buffer = buffer.unwrap();
-                if self
-                    .blit_images(
-                        ImgPtr(new_buffer.image),
-                        ImgPtr(buffer.image),
-                        0,
-                        0,
-                        cmp::min(buffer.width.into(), new_buffer.width.into()),
-                        cmp::min(buffer.height.into(), new_buffer.height.into()),
-                        0,
-                        0,
-                        0,
-                    )
-                    .is_err()
-                    && buffer.linear_buffer.is_none()
+                let buffer = state.as_mut().unwrap().buffers[buf_id].take();
+                if buffer.is_some()
+                    && (!matches!(buffer_type, BufferType::Front)
+                        || self.has_fake_front.load(Ordering::Acquire))
                 {
+                    let buffer = buffer.unwrap();
+                    if self
+                        .blit_images(
+                            ImgPtr(new_buffer.image),
+                            ImgPtr(buffer.image),
+                            0,
+                            0,
+                            cmp::min(buffer.width.into(), new_buffer.width.into()),
+                            cmp::min(buffer.height.into(), new_buffer.height.into()),
+                            0,
+                            0,
+                            0,
+                        )
+                        .is_err()
+                        && buffer.linear_buffer.is_none()
+                    {
+                        reset_fence(new_buffer.shm_fence);
+                        let gc = self.drawable_gc(&mut *conn)?;
+                        conn.copy_area(
+                            buffer.pixmap,
+                            new_buffer.pixmap,
+                            gc,
+                            0,
+                            0,
+                            width,
+                            height,
+                            0,
+                            0,
+                        )?;
+                        trigger_fence::<Dpy>(&mut conn, new_buffer.sync_fence)?;
+                        fence_await = true;
+                    }
+
+                    mem::drop(conn);
+                    free_buffer_arc(buffer, self)?;
+                } else if matches!(buffer_type, BufferType::Front) {
+                    // fill the new fake front with data from the real front
+                    mem::drop((conn, state.take()));
+                    self.swapbuffer_barrier()?;
+                    let mut conn = self.display.display();
                     reset_fence(new_buffer.shm_fence);
                     let gc = self.drawable_gc(&mut *conn)?;
                     conn.copy_area(
-                        buffer.pixmap,
+                        self.x_drawable,
                         new_buffer.pixmap,
                         gc,
                         0,
@@ -977,74 +1054,60 @@ where
                         0,
                     )?;
                     trigger_fence::<Dpy>(&mut conn, new_buffer.sync_fence)?;
-                    fence_await = true;
+
+                    if let Some(linear_buffer) = new_buffer.linear_buffer {
+                        block_on_fence(&mut *conn, Some(self), &new_buffer)?;
+                        self.blit_images(
+                            ImgPtr(new_buffer.image),
+                            ImgPtr(linear_buffer),
+                            0,
+                            0,
+                            width.into(),
+                            height.into(),
+                            0,
+                            0,
+                            0,
+                        )?;
+                    } else {
+                        fence_await = true;
+                    }
                 }
 
-                mem::drop(conn);
-                free_buffer_arc(buffer, self)?;
-            } else if matches!(buffer_type, BufferType::Front) {
-                // fill the new fake front with data from the real front
-                mem::drop((conn, state.take()));
-                self.swapbuffer_barrier()?;
-                let mut conn = self.display.display();
-                reset_fence(new_buffer.shm_fence);
-                let gc = self.drawable_gc(&mut *conn)?;
-                conn.copy_area(
-                    self.x_drawable,
-                    new_buffer.pixmap,
-                    gc,
-                    0,
-                    0,
-                    width,
-                    height,
-                    0,
-                    0,
-                )?;
-                trigger_fence::<Dpy>(&mut conn, new_buffer.sync_fence)?;
-
-                if let Some(linear_buffer) = new_buffer.linear_buffer {
-                    block_on_fence(&mut *conn, Some(self), &new_buffer)?;
-                    self.blit_images(
-                        ImgPtr(new_buffer.image),
-                        ImgPtr(linear_buffer),
-                        0,
-                        0,
-                        width.into(),
-                        height.into(),
-                        0,
-                        0,
-                        0,
-                    )?;
-                } else {
-                    fence_await = true;
+                if state.is_none() {
+                    *state = Some(self.state());
                 }
-            }
+                state.as_mut().unwrap().buffers[buf_id] = Some(new_buffer.clone());
+                Ok(new_buffer)
+            };
 
-            *state = Some(self.state());
-            state.as_mut().unwrap().buffers[buf_id] = Some(new_buffer.clone());
-            Ok(new_buffer)
-        };
-
-        let buffer = match state.take().unwrap().buffers[buf_id] {
-            None => create_new_buffer(&mut state)?,
+        let mut temp_state = self.state();
+        let buffer = match temp_state.buffers[buf_id] {
+            None => { mem::drop(temp_state); create_new_buffer(&mut state)? },
             Some(ref buffer)
                 if buffer.reallocate || buffer.width != width || buffer.height != height =>
             {
+                mem::drop(temp_state);
                 create_new_buffer(&mut state)?
             }
             Some(ref buffer) => {
                 let res = buffer.clone();
-                state = Some(self.state());
+                mem::drop(temp_state);
                 res
             }
         };
 
+        log::trace!("Finished buffer initialization");
+
         if fence_await {
+            mem::drop(state.take());
             block_on_fence(&mut *self.display.display(), Some(self), &buffer)?;
         }
 
         // if we need to preserve the content of previous buffers...
-        let mut state = state.unwrap();
+        let mut state = match state {
+            Some(lock) => lock,
+            None => self.state(),
+        };
         if matches!(buffer_type, BufferType::Back)
             && state.cur_blit_source != -1
             && state.buffers[state.cur_blit_source as usize].is_some()
@@ -1083,6 +1146,7 @@ where
             state.cur_blit_source = -1;
         }
 
+        log::trace!("Leaving scope for get_buffer");
         Ok(buffer)
     }
 
@@ -1236,8 +1300,8 @@ where
             self.is_initialized.store(true, Ordering::Release);
 
             // activate checked mode if we haven't already
-            //            let old_checked = conn.checked();
-            //            conn.set_checked(true);
+            let old_checked = conn.checked();
+            conn.set_checked(true);
 
             // now that we have a lock, create an EID that represents the
             // special event selection
@@ -1295,7 +1359,7 @@ where
             self.width.store(geometry.width, Ordering::Relaxed);
             self.height.store(geometry.height, Ordering::Relaxed);
 
-            //            conn.set_checked(old_checked);
+            conn.set_checked(old_checked);
         }
 
         if self.process_present_events(&mut conn, &mut guard)? {
@@ -2047,9 +2111,9 @@ where
     unsafe { (xawait)(buffer.shm_fence.as_ptr()) };
 
     if let Some(drawable) = drawable {
+        log::trace!("Borrowing guard for drawable");
         let mut guard = drawable.state();
-        let mut conn = drawable.display.display();
-        drawable.process_present_events(&mut *conn, &mut *guard)?;
+        drawable.process_present_events(conn, &mut *guard)?;
     }
 
     Ok(())
