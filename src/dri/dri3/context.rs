@@ -221,6 +221,16 @@ where
         };
 
         // bind the context to the OpenGL driver
+        log::trace!("Binding to {:p}, {:p}, {:p}",                 self.dri_context().as_ptr(),
+                match draw {
+                    Some(ref draw) => draw.dri_drawable().as_ptr(),
+                    None => ptr::null_mut(),
+                },
+                match read {
+                    Some(ref read) => read.dri_drawable().as_ptr(),
+                    None => ptr::null_mut(),
+                });
+
         if unsafe {
             ((*self.screen().inner.core)
                 .bindContext

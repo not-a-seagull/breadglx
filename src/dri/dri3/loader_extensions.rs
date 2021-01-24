@@ -37,6 +37,9 @@ unsafe extern "C" fn get_buffers<Dpy: DisplayLike>(
 where
     Dpy::Connection: Connection,
 {
+    const __DRI_IMAGE_BUFFER_FRONT: u32 = ffi::__DRIimageBufferMask___DRI_IMAGE_BUFFER_FRONT;
+    const __DRI_IMAGE_BUFFER_BACK: u32  = ffi::__DRIimageBufferMask___DRI_IMAGE_BUFFER_BACK;
+
     // write some of our initial values to the buffers variable
     ptr::write(raw_mut!((*buffers).image_mask), 0);
     ptr::write(raw_mut!((*buffers).front), ptr::null_mut());
@@ -62,16 +65,18 @@ where
         // free back buffers we no longer need
         drawable.free_back_buffers()?;
         if drawable.is_pixmap() || drawable.swap_method() == ffi::__DRI_ATTRIB_SWAP_EXCHANGE as _ {
-            buffer_mask |= ffi::__DRI_IMAGE_BUFFER_FRONT as u32;
+            buffer_mask |= __DRI_IMAGE_BUFFER_FRONT as u32;
         }
 
         let buffers = unsafe { &mut *buffers };
 
-        if buffer_mask & ffi::__DRI_IMAGE_BUFFER_FRONT as u32 == 0 {
+        if buffer_mask & __DRI_IMAGE_BUFFER_FRONT as u32 == 0 {
             // we don't need a front buffer
             drawable.free_buffers(BufferType::Front)?;
             drawable.set_have_fake_front(false);
         } else {
+            log::trace!("Loading front buffer...");
+
             let not_fake_front = drawable.is_pixmap() && !drawable.is_different_gpu();
             let buffer = if not_fake_front {
                 drawable.get_pixmap_buffer(BufferType::Front, format)?
@@ -79,18 +84,20 @@ where
                 drawable.get_buffer(BufferType::Front, format)?
             };
 
-            buffers.image_mask |= ffi::__DRI_IMAGE_BUFFER_FRONT as u32;
+            buffers.image_mask |= __DRI_IMAGE_BUFFER_FRONT as u32;
             buffers.front = buffer.image.as_ptr();
             drawable.set_have_fake_front(!not_fake_front);
         }
 
-        if buffer_mask & ffi::__DRI_IMAGE_BUFFER_BACK as u32 == 0 {
+        if buffer_mask & __DRI_IMAGE_BUFFER_BACK as u32 == 0 {
             drawable.free_buffers(BufferType::Back)?;
             drawable.set_have_back(false);
         } else {
+            log::trace!("Loading back buffer...");
+
             let back = drawable.get_buffer(BufferType::Back, format)?;
             drawable.set_have_back(true);
-            buffers.image_mask |= ffi::__DRI_IMAGE_BUFFER_BACK as u32;
+            buffers.image_mask |= __DRI_IMAGE_BUFFER_BACK as u32;
             buffers.back = back.image.as_ptr();
         }
 

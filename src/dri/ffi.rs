@@ -4,9 +4,6 @@
 
 use std::os::raw::c_int;
 
-pub const __DRI_IMAGE_BUFFER_FRONT: c_int = 1 << 0;
-pub const __DRI_IMAGE_BUFFER_BACK: c_int = 1 << 1;
-
 pub const _STDINT_H: u32 = 1;
 pub const _FEATURES_H: u32 = 1;
 pub const _DEFAULT_SOURCE: u32 = 1;
