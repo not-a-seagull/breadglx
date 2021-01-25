@@ -3,10 +3,10 @@
 use crate::{
     config::GlConfig,
     context::{dispatch::ContextDispatch, GlContext, GlContextRule, InnerGlContext},
-    display::DisplayLike,
+    display::{DisplayLike, GlDisplay},
     screen::GlInternalScreen,
 };
-use breadx::{Drawable, display::Connection};
+use breadx::{display::Connection, Drawable};
 use std::{marker::PhantomData, sync::Arc};
 
 #[cfg(feature = "async")]
@@ -37,6 +37,7 @@ where
     #[inline]
     fn swap_buffers(
         &self,
+        display: &GlDisplay<Dpy>,
         drawable: Drawable,
         target_msc: i64,
         divisor: i64,

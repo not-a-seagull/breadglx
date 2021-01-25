@@ -3,6 +3,7 @@
 use super::{
     config::GlConfig,
     display::{DisplayLike, GlDisplay},
+    screen::GlScreen,
 };
 use breadx::{
     auto::glx::{self, Context},
