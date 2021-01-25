@@ -2,7 +2,7 @@
 
 `breadglx` is an extension to [`breadx`](https://crates.io/crates/breadx) designed to tie together breadx's GLX API with the hardware support offered by the Mesa3D libraries found on most Unix systems.
 
-This is nowhere near ready yet.
+We currently have an example that "works" in the most technical sense. However, it's held together by duct tape and silly string, and it only works on systems that support DRI3 (it panics otherwise).
 
 ## Why is this not just a part of breadx?
 
