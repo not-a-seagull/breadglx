@@ -9,7 +9,13 @@ use breadx::{
     display::{Connection, Display},
     Drawable,
 };
-use std::{any::Any, mem, sync::Arc};
+use std::{
+    any::Any,
+    ffi::{c_void, CStr},
+    mem,
+    ptr::NonNull,
+    sync::Arc,
+};
 
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
@@ -34,6 +40,27 @@ use futures_lite::future;
 use once_cell::sync::OnceCell;
 #[cfg(not(feature = "async"))]
 use std::sync::{self, RwLockReadGuard};
+
+#[derive(Debug, Copy, Clone)]
+#[repr(transparent)]
+pub(crate) struct ProcAddress(NonNull<c_void>);
+
+unsafe impl Send for ProcAddress {}
+//unsafe impl Sync for ProcAddress {}
+
+impl From<NonNull<c_void>> for ProcAddress {
+    #[inline]
+    fn from(p: NonNull<c_void>) -> Self {
+        Self(p)
+    }
+}
+
+impl ProcAddress {
+    #[inline]
+    pub fn into_inner(self) -> NonNull<c_void> {
+        self.0
+    }
+}
 
 /// The context in which OpenGL functions are executed.
 #[repr(transparent)]
@@ -71,12 +98,15 @@ pub(crate) trait GlInternalContext<Dpy> {
     ) -> breadx::Result<()>;
 
     fn unbind(&self) -> breadx::Result<()>;
+
+    /// Get the proc address for the given function.
+    fn get_proc_address(&self, name: &CStr) -> Option<ProcAddress>;
 }
 
+#[cfg(feature = "async")]
 pub(crate) trait AsyncGlInternalContext<Dpy> {
     fn is_direct(&self) -> bool;
 
-    #[cfg(feature = "async")]
     fn bind_async<'future, 'a, 'b>(
         &'a self,
         dpy: &'b GlDisplay<Dpy>,
@@ -87,8 +117,14 @@ pub(crate) trait AsyncGlInternalContext<Dpy> {
         'a: 'future,
         'b: 'future;
 
-    #[cfg(feature = "async")]
     fn unbind_async<'future>(&'future self) -> GenericFuture<'future, breadx::Result<()>>;
+    fn get_proc_address_async<'future, 'a, 'b>(
+        &'a self,
+        name: &'b CStr,
+    ) -> GenericFuture<'future, Option<ProcAddress>>
+    where
+        'a: 'future,
+        'b: 'future;
 }
 
 impl<Dpy> GlContext<Dpy> {
@@ -172,6 +208,11 @@ where
     ) -> breadx::Result<Option<GlContext<Dpy>>> {
         let draw = draw.into();
         self.bind_internal(dpy, Some(draw), Some(draw))
+    }
+
+    #[inline]
+    pub(crate) fn get_proc_address(&self, name: &CStr) -> Option<ProcAddress> {
+        self.inner.inner.get_proc_address(name)
     }
 }
 

@@ -1082,7 +1082,10 @@ where
 
         let mut temp_state = self.state();
         let buffer = match temp_state.buffers[buf_id] {
-            None => { mem::drop(temp_state); create_new_buffer(&mut state)? },
+            None => {
+                mem::drop(temp_state);
+                create_new_buffer(&mut state)?
+            }
             Some(ref buffer)
                 if buffer.reallocate || buffer.width != width || buffer.height != height =>
             {

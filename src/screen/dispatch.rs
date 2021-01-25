@@ -8,7 +8,7 @@ use crate::{
     dri::{dri2, dri3},
     indirect,
 };
-use breadx::display::Connection;
+use breadx::{display::Connection, Drawable};
 use std::sync::Arc;
 
 #[cfg(feature = "async")]
@@ -68,6 +68,24 @@ where
             Self::Dri3(d3) => d3.create_context(base, fbconfig, rules, share),
         }
     }
+
+    #[inline]
+    fn swap_buffers(
+        &self,
+        drawable: Drawable,
+        target_msc: i64,
+        divisor: i64,
+        remainder: i64,
+        flush: bool,
+    ) -> breadx::Result {
+        match self {
+            Self::Indirect(is) => is.swap_buffers(drawable, target_msc, divisor, remainder, flush),
+            #[cfg(feature = "dri")]
+            Self::Dri2(d2) => d2.swap_buffers(drawable, target_msc, divisor, remainder, flush),
+            #[cfg(feature = "dri3")]
+            Self::Dri3(d3) => d3.swap_buffers(drawable, target_msc, divisor, remainder, flush),
+        }
+    }
 }
 
 #[cfg(feature = "async")]
@@ -96,6 +114,30 @@ where
             Self::Dri2(d2) => d2.create_context_async(base, fbconfig, rules, share),
             #[cfg(feature = "dri3")]
             Self::Dri3(d3) => d3.create_context_async(base, fbconfig, rules, share),
+        }
+    }
+
+    #[inline]
+    fn swap_buffers_async<'future>(
+        &'future self,
+        drawable: Drawable,
+        target_msc: i64,
+        divisor: i64,
+        remainder: i64,
+        flush: bool,
+    ) -> GenericFuture<'future, breadx::Result> {
+        match self {
+            Self::Indirect(is) => {
+                is.swap_buffers_async(drawable, target_msc, divisor, remainder, flush)
+            }
+            #[cfg(feature = "dri")]
+            Self::Dri2(d2) => {
+                d2.swap_buffers_async(drawable, target_msc, divisor, remainder, flush)
+            }
+            #[cfg(feature = "dri3")]
+            Self::Dri3(d3) => {
+                d3.swap_buffers_async(drawable, target_msc, divisor, remainder, flush)
+            }
         }
     }
 }

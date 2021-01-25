@@ -25,6 +25,7 @@ memchr = "2.3.4"
 
 [dev-dependencies]
 env_logger = { version = "0.8", default-features = false, features = ["atty", "termcolor"] }
+gl = "0.14.0"
 
 [features]
 default = ["dri3"]

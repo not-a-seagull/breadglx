@@ -6,7 +6,7 @@ use crate::{
     display::DisplayLike,
     screen::GlInternalScreen,
 };
-use breadx::Connection;
+use breadx::{Connection, Drawable};
 use std::sync::Arc;
 
 #[cfg(feature = "async")]
@@ -33,6 +33,18 @@ where
     ) -> breadx::Result<ContextDispatch<Dpy>> {
         unimplemented!()
     }
+
+    #[inline]
+    fn swap_buffers(
+        &self,
+        drawable: Drawable,
+        target_msc: i64,
+        divisor: i64,
+        remainder: i64,
+        flush: bool,
+    ) -> breadx::Result {
+        unimplemented!()
+    }
 }
 
 #[cfg(feature = "async")]
@@ -55,6 +67,18 @@ where
         'd: 'future,
         'e: 'future,
     {
+        Box::pin(async { unimplemented!() })
+    }
+
+    #[inline]
+    fn swap_buffers_async<'future>(
+        &'future self,
+        drawable: Drawable,
+        target_msc: i64,
+        divisor: i64,
+        remainder: i64,
+        flush: bool,
+    ) -> GenericFuture<'future, breadx::Result> {
         Box::pin(async { unimplemented!() })
     }
 }

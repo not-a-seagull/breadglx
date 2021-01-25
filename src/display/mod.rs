@@ -1,6 +1,13 @@
 // MIT/Apache2 License
 
-use crate::{config::GlConfig, dri, indirect, mesa, screen::GlScreen, util::env_to_boolean};
+use crate::{
+    config::GlConfig,
+    context::{promote_anyarc_ref, GlContext},
+    cstr::{const_cstr, ConstCstr},
+    dri, indirect, mesa,
+    screen::GlScreen,
+    util::env_to_boolean,
+};
 use breadx::{
     display::{Connection, Display, DisplayLike as DpyLikeBase},
     Drawable, Visualtype,
@@ -8,8 +15,11 @@ use breadx::{
 use dashmap::DashMap;
 use std::{
     collections::HashMap,
+    ffi::{c_void, CStr, CString},
     marker::PhantomData,
     ops::{Deref, DerefMut, Range},
+    os::raw::c_char,
+    ptr,
     sync::Arc,
 };
 
@@ -191,6 +201,9 @@ impl GlStats {
     }
 }
 
+const GLAPI_GET_PROC_ADDRESS: ConstCstr<'static> = const_cstr(&*b"_glapi_get_proc_address\0");
+type GlapiGetProcAddress = unsafe extern "C" fn(*const c_char) -> *mut c_void;
+
 impl<Dpy: DisplayLike> GlDisplay<Dpy>
 where
     Dpy::Connection: Connection,
@@ -231,6 +244,52 @@ where
         };
 
         Ok(map.get(&property).copied())
+    }
+
+    /// Get the address of the desired function, but takes a C String.
+    #[inline]
+    pub fn get_proc_address_cstr(&self, function: &CStr) -> breadx::Result<*const c_void> {
+        let bytes = function.to_bytes();
+        if bytes[0] == b'g' && bytes[1] == b'l' && bytes[2] != b'X' {
+            // try to call _glapi_get_proc_address to get the address
+            let glapi = mesa::glapi()?;
+            let glapi_get_proc_address: GlapiGetProcAddress =
+                unsafe { glapi.function(&*GLAPI_GET_PROC_ADDRESS) }
+                    .expect("_glapi_proc not present");
+            let mut f = unsafe { glapi_get_proc_address(function.as_ptr()) };
+
+            // if that failed, get the current context (if possible)
+            if f.is_null() {
+                if let Some(ref ctx) = GlContext::<Dpy>::get()
+                    .as_ref()
+                    .and_then(|m| promote_anyarc_ref::<Dpy>(m))
+                {
+                    f = match ctx.get_proc_address(function) {
+                        Some(p) => p.into_inner().as_ptr(),
+                        None => ptr::null_mut(),
+                    };
+                }
+            }
+
+            if f.is_null() {
+                Err(breadx::BreadError::Msg(format!(
+                    "Unable to find OpenGL function: {:?}",
+                    function
+                )))
+            } else {
+                Ok(f as *const _)
+            }
+        } else {
+            Err(breadx::BreadError::StaticMsg("Invalid GL function name"))
+        }
+    }
+
+    /// Get the address of the desired function.
+    #[inline]
+    pub fn get_proc_address(&self, function: &str) -> breadx::Result<*const c_void> {
+        let function = CString::new(function)
+            .map_err(|_| breadx::BreadError::StaticMsg("string has a zero?"))?;
+        self.get_proc_address_cstr(&*function)
     }
 
     #[inline]

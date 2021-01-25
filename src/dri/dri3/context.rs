@@ -5,7 +5,7 @@ use crate::{
     config::GlConfig,
     context::{
         promote_anyarc_ref, ContextDispatch, GlContext, GlContextRule, GlInternalContext,
-        InnerGlContext,
+        InnerGlContext, ProcAddress,
     },
     display::{DisplayLike, GlDisplay},
     dri::{convert_dri_rules, ffi, DriRules, ExtensionContainer},
@@ -15,7 +15,7 @@ use breadx::{
     Drawable,
 };
 use std::{
-    ffi::c_void,
+    ffi::{c_void, CStr},
     os::raw::c_uint,
     ptr::{self, NonNull},
     sync::{
@@ -29,6 +29,8 @@ use tinyvec::ArrayVec;
 use crate::{context::AsyncGlInternalContext, util::GenericFuture};
 #[cfg(feature = "async")]
 use breadx::display::AsyncConnection;
+#[cfg(feature = "async")]
+use futures_lite::future;
 
 // it's useful to assign each context a context ID
 static CONTEXT_ID: AtomicUsize = AtomicUsize::new(0);
@@ -221,15 +223,18 @@ where
         };
 
         // bind the context to the OpenGL driver
-        log::trace!("Binding to {:p}, {:p}, {:p}",                 self.dri_context().as_ptr(),
-                match draw {
-                    Some(ref draw) => draw.dri_drawable().as_ptr(),
-                    None => ptr::null_mut(),
-                },
-                match read {
-                    Some(ref read) => read.dri_drawable().as_ptr(),
-                    None => ptr::null_mut(),
-                });
+        log::trace!(
+            "Binding to {:p}, {:p}, {:p}",
+            self.dri_context().as_ptr(),
+            match draw {
+                Some(ref draw) => draw.dri_drawable().as_ptr(),
+                None => ptr::null_mut(),
+            },
+            match read {
+                Some(ref read) => read.dri_drawable().as_ptr(),
+                None => ptr::null_mut(),
+            }
+        );
 
         if unsafe {
             ((*self.screen().inner.core)
@@ -272,6 +277,11 @@ where
     fn unbind(&self) -> breadx::Result<()> {
         self.unbind_internal();
         Ok(())
+    }
+
+    #[inline]
+    fn get_proc_address(&self, name: &CStr) -> Option<ProcAddress> {
+        None
     }
 }
 
@@ -354,11 +364,22 @@ where
         })
     }
 
-    #[cfg(feature = "async")]
     #[inline]
     fn unbind_async<'future>(&'future self) -> GenericFuture<'future, breadx::Result> {
         let this = self.clone();
         Box::pin(blocking::unblock(move || this.unbind_internal()))
+    }
+
+    #[inline]
+    fn get_proc_address_async<'future, 'a, 'b>(
+        &'a self,
+        name: &'b CStr,
+    ) -> GenericFuture<'future, Option<ProcAddress>>
+    where
+        'a: 'future,
+        'b: 'future,
+    {
+        Box::pin(future::ready(None))
     }
 }
 

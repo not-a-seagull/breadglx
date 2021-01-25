@@ -11,7 +11,7 @@ use std::{io::Write, env, mem};
 fn main() -> Result<()> {
     env_logger::Builder::new()
         .filter(Some("breadx"), LevelFilter::Warn)
-        .filter(Some("breadglx"), LevelFilter::Trace)
+        .filter(Some("breadglx"), LevelFilter::Info)
         .init();
 
     // establish a connection, wrap it in a GlDisplay, and use that to produce a GlScreen
@@ -92,7 +92,7 @@ fn main() -> Result<()> {
         GlContextRule::MinorVersion(0),
     ];
 
-    let context = match screen.create_context(&mut conn, &fbconfig, CONTEXT_RULES, None) {
+    let context = match screen.create_context(&conn, &fbconfig, CONTEXT_RULES, None) {
         Ok(context) => context,
         Err(e) => {
             // if we failed to initialize the GlContext, fall back to an older version of OpenGL
@@ -105,9 +105,29 @@ fn main() -> Result<()> {
         }
     };
 
+    // bind the current context
     context.bind(&mut conn, win)?;
 
-    println!("Leaving main thread...");
+    // use the get proc address function as a way of getting GL functions for whatever interface
+    // we end up using.
+    // here we use the `gl` crate, but if you use something like glow it shouldn't be dissimilar
+    let dpy_clone = conn.clone();
+    gl::load_with(move |s| match dpy_clone.get_proc_address(s) {
+        Ok(pa) => pa,
+        Err(e) => {
+            eprintln!("Unable to get proc address for {}: {:?}", s, e);
+            std::ptr::null()
+        }
+    });
+
+    // SAFETY: We are most likely calling GL primitives here.
+    unsafe {
+        gl::ClearColor(0.0, 0.5, 1.0, 1.0);
+        gl::Clear(gl::COLOR_BUFFER_BIT);
+    }
+
+    // swap buffers
+    screen.swap_buffers(&conn, win)?;
 
     Ok(())
 }

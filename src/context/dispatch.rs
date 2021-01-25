@@ -1,6 +1,6 @@
 // MIT/Apache2 License
 
-use super::GlInternalContext;
+use super::{GlInternalContext, ProcAddress};
 use crate::{
     display::{DisplayLike, GlDisplay},
     dri::{dri2, dri3},
@@ -10,12 +10,14 @@ use breadx::{
     display::{Connection, Display},
     Drawable,
 };
+use std::ffi::CStr;
 
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
 #[cfg(feature = "async")]
 use breadx::display::AsyncConnection;
 
+#[derive(Debug)]
 pub enum ContextDispatch<Dpy> {
     Indirect(indirect::IndirectContext<Dpy>),
     Placeholder,
@@ -94,6 +96,18 @@ where
             Self::Dri3(d3) => d3.unbind(),
         }
     }
+
+    #[inline]
+    fn get_proc_address(&self, name: &CStr) -> Option<ProcAddress> {
+        match self {
+            Self::Placeholder => unreachable!("Invalid placeholder"),
+            Self::Indirect(i) => i.get_proc_address(name),
+            #[cfg(feature = "dri")]
+            Self::Dri2(d2) => d2.get_proc_address(name),
+            #[cfg(feature = "dri3")]
+            Self::Dri3(d3) => d3.get_proc_address(name),
+        }
+    }
 }
 
 #[cfg(feature = "async")]
@@ -122,7 +136,6 @@ where
         }
     }
 
-    #[cfg(feature = "async")]
     #[inline]
     fn unbind_async<'future>(&'future self) -> GenericFuture<'future, breadx::Result<()>> {
         match self {
@@ -132,6 +145,25 @@ where
             Self::Dri2(d2) => d2.unbind_async(),
             #[cfg(feature = "dri3")]
             Self::Dri3(d3) => d3.unbind_async(),
+        }
+    }
+
+    #[inline]
+    fn get_proc_address<'future, 'a, 'b>(
+        &'a self,
+        name: &'b CStr,
+    ) -> GenericFuture<'future, Option<ProcAddress>>
+    where
+        'a: 'future,
+        'b: 'future,
+    {
+        match self {
+            Self::Placeholder => unreachable!("Invalid placeholder"),
+            Self::Indirect(i) => i.get_proc_address_async(name),
+            #[cfg(feature = "dri")]
+            Self::Dri2(d2) => d2.get_proc_address_async(name),
+            #[cfg(feature = "dri3")]
+            Self::Dri3(d3) => d3.get_proc_address_async(name),
         }
     }
 }

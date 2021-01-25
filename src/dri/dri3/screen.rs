@@ -24,7 +24,7 @@ use std::{
 };
 
 #[cfg(feature = "async")]
-use crate::util::GenericFuture;
+use crate::{context::AsyncGlInternalScreen, util::GenericFuture};
 
 #[repr(transparent)]
 #[derive(Debug)]
@@ -524,7 +524,25 @@ where
         Ok(cfg.into())
     }
 
-    #[cfg(feature = "async")]
+    #[inline]
+    fn swap_buffers(
+        &self,
+        drawable: Drawable,
+        target_msc: i64,
+        divisor: i64,
+        remainder: i64,
+        flush: bool,
+    ) -> breadx::Result {
+        unimplemented!()
+    }
+}
+
+#[cfg(feature = "async")]
+impl<Dpy: DisplayLike> AsyncGlInternalScreen<Dpy> for Dri3Screen<Dpy>
+where
+    Dpy::Connection: AsyncConnection,
+{
+    #[inline]
     fn create_context_async<'future, 'a, 'b, 'c, 'd, 'e>(
         &'a self,
         base: &'b mut Arc<InnerGlContext<Dpy>>,
@@ -543,6 +561,18 @@ where
             let cfg = super::Dri3Context::new_async(self, fbconfig, rules, share, base).await?;
             Ok(cfg.into())
         })
+    }
+
+    #[inline]
+    fn swap_buffers_async<'future>(
+        &'future self,
+        drawable: Drawable,
+        target_msc: i64,
+        divisor: i64,
+        remainder: i64,
+        flush: bool,
+    ) -> GenericFuture<'future, breadx::Result> {
+        Box::pin(async { unimplemented!() })
     }
 }
 

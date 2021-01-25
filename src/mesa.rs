@@ -45,7 +45,7 @@ impl<T, F> Lazy<T, F> {
     }
 
     #[inline]
-    fn get_raw(&self) -> Option<&T> {
+    unsafe fn get_raw(&self) -> Option<&T> {
         let slot = unsafe { &*self.data.get() };
         slot.as_ref()
     }
@@ -56,7 +56,7 @@ impl<T: Send + 'static, F: FnOnce() -> T + Send + 'static> Lazy<T, F> {
     #[inline]
     async fn get(&self) -> &T {
         // if the value is already initialized, return it
-        if let Some(val) = self.get_raw() {
+        if let Some(val) = unsafe { self.get_raw() } {
             return val;
         }
 
@@ -71,7 +71,7 @@ impl<T: Send + 'static, F: FnOnce() -> T + Send + 'static> Lazy<T, F> {
             self.is_initialized.store(true, Ordering::Release);
         }
 
-        self.get_raw().expect("Literally impossible")
+        unsafe { self.get_raw() }.expect("Literally impossible")
     }
 }
 
@@ -81,17 +81,15 @@ unsafe impl<T: Send, F: Send> Send for Lazy<T, F> {}
 unsafe impl<T: Sync + Send, F: Send> Sync for Lazy<T, F> {}
 
 const GL_LIB_NAMES: [&str; 2] = ["libGL.so", "libGL.so.1"];
-
 const DRM_LIB_NAMES: [&str; 2] = ["libdrm.so", "libdrm.so.2"];
-
 const XSHMFENCE_LIB_NAMES: [&str; 2] = ["libxshmfence.so", "libxshmfence.so.1"];
+const GLAPI_LIB_NAMES: [&str; 3] = ["libglapi.so", "libglapi.so.0", "libglapi.so.0.0.0"];
 
 static GL: Lazy<breadx::Result<Dll>> = Lazy::new(|| Dll::load("LibGL", &GL_LIB_NAMES));
-
 static DRM: Lazy<breadx::Result<Dll>> = Lazy::new(|| Dll::load("LibDRM", &DRM_LIB_NAMES));
-
 static XSHMFENCE: Lazy<breadx::Result<Dll>> =
     Lazy::new(|| Dll::load("LibXShmFence", &XSHMFENCE_LIB_NAMES));
+static GLAPI: Lazy<breadx::Result<Dll>> = Lazy::new(|| Dll::load("LibGLAPI", &GLAPI_LIB_NAMES));
 
 #[inline]
 fn unwrap_result(res: &breadx::Result<Dll>) -> breadx::Result<&Dll> {
@@ -158,4 +156,23 @@ pub(crate) fn xshmfence() -> breadx::Result<&'static Dll> {
 #[inline]
 pub(crate) async fn xshmfence_async() -> breadx::Result<&'static Dll> {
     unwrap_result(XSHMFENCE.get().await)
+}
+
+#[inline]
+pub(crate) fn glapi() -> breadx::Result<&'static Dll> {
+    #[cfg(feature = "async")]
+    {
+        future::block_on(glapi_async())
+    }
+    #[cfg(not(feature = "async"))]
+    {
+        let res = &*GLAPI;
+        unwrap_result(res)
+    }
+}
+
+#[cfg(feature = "async")]
+#[inline]
+pub(crate) async fn glapi_async() -> breadx::Result<&'static Dll> {
+    unwrap_result(GLAPI.get().await)
 }

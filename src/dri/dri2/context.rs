@@ -1,19 +1,21 @@
 // MIT/Apache2 License
 
 use crate::{
-    context::GlInternalContext,
+    context::{GlInternalContext, ProcAddress},
     display::{DisplayLike, GlDisplay},
 };
 use breadx::{
     display::{Connection, Display},
     Drawable,
 };
+use std::ffi::CStr;
 
 #[cfg(feature = "async")]
 use crate::{context::AsyncGlInternalContext, util::GenericFuture};
 #[cfg(feature = "async")]
 use breadx::display::AsyncConnection;
 
+#[derive(Debug)]
 pub struct Dri2Context<Dpy> {
     p: Dpy,
 }
@@ -34,6 +36,11 @@ where
 
     #[inline]
     fn unbind(&self) -> breadx::Result {
+        unimplemented!()
+    }
+
+    #[inline]
+    fn get_proc_address(&self, name: &CStr) -> Option<ProcAddress> {
         unimplemented!()
     }
 }
@@ -59,6 +66,18 @@ where
 
     #[inline]
     fn unbind_async<'future>(&'future self) -> GenericFuture<'future, breadx::Result> {
+        Box::pin(async { unimplemented!() })
+    }
+
+    #[inline]
+    fn get_proc_address_async<'future, 'a, 'b>(
+        &'a self,
+        name: &'b CStr,
+    ) -> GenericFuture<'future, Option<ProcAddress>>
+    where
+        'a: 'future,
+        'b: 'future,
+    {
         Box::pin(async { unimplemented!() })
     }
 }

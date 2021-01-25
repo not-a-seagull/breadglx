@@ -38,7 +38,7 @@ where
     Dpy::Connection: Connection,
 {
     const __DRI_IMAGE_BUFFER_FRONT: u32 = ffi::__DRIimageBufferMask___DRI_IMAGE_BUFFER_FRONT;
-    const __DRI_IMAGE_BUFFER_BACK: u32  = ffi::__DRIimageBufferMask___DRI_IMAGE_BUFFER_BACK;
+    const __DRI_IMAGE_BUFFER_BACK: u32 = ffi::__DRIimageBufferMask___DRI_IMAGE_BUFFER_BACK;
 
     // write some of our initial values to the buffers variable
     ptr::write(raw_mut!((*buffers).image_mask), 0);
