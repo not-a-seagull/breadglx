@@ -4,7 +4,7 @@ use super::GlInternalScreen;
 use crate::{
     config::GlConfig,
     context::{ContextDispatch, GlContext, GlContextRule, InnerGlContext},
-    display::DisplayLike,
+    display::{DisplayLike, GlDisplay},
     dri::{dri2, dri3},
     indirect,
 };
@@ -72,6 +72,7 @@ where
     #[inline]
     fn swap_buffers(
         &self,
+        dpy: &GlDisplay<Dpy>,
         drawable: Drawable,
         target_msc: i64,
         divisor: i64,
@@ -79,11 +80,13 @@ where
         flush: bool,
     ) -> breadx::Result {
         match self {
-            Self::Indirect(is) => is.swap_buffers(drawable, target_msc, divisor, remainder, flush),
+            Self::Indirect(is) => {
+                is.swap_buffers(dpy, drawable, target_msc, divisor, remainder, flush)
+            }
             #[cfg(feature = "dri")]
-            Self::Dri2(d2) => d2.swap_buffers(drawable, target_msc, divisor, remainder, flush),
+            Self::Dri2(d2) => d2.swap_buffers(dpy, drawable, target_msc, divisor, remainder, flush),
             #[cfg(feature = "dri3")]
-            Self::Dri3(d3) => d3.swap_buffers(drawable, target_msc, divisor, remainder, flush),
+            Self::Dri3(d3) => d3.swap_buffers(dpy, drawable, target_msc, divisor, remainder, flush),
         }
     }
 }
@@ -118,25 +121,30 @@ where
     }
 
     #[inline]
-    fn swap_buffers_async<'future>(
-        &'future self,
+    fn swap_buffers_async<'future, 'a, 'b>(
+        &'a self,
+        dpy: &'b GlDisplay<Dpy>,
         drawable: Drawable,
         target_msc: i64,
         divisor: i64,
         remainder: i64,
         flush: bool,
-    ) -> GenericFuture<'future, breadx::Result> {
+    ) -> GenericFuture<'future, breadx::Result>
+    where
+        'a: 'future,
+        'b: 'future,
+    {
         match self {
             Self::Indirect(is) => {
-                is.swap_buffers_async(drawable, target_msc, divisor, remainder, flush)
+                is.swap_buffers_async(dpy, drawable, target_msc, divisor, remainder, flush)
             }
             #[cfg(feature = "dri")]
             Self::Dri2(d2) => {
-                d2.swap_buffers_async(drawable, target_msc, divisor, remainder, flush)
+                d2.swap_buffers_async(dpy, drawable, target_msc, divisor, remainder, flush)
             }
             #[cfg(feature = "dri3")]
             Self::Dri3(d3) => {
-                d3.swap_buffers_async(drawable, target_msc, divisor, remainder, flush)
+                d3.swap_buffers_async(dpy, drawable, target_msc, divisor, remainder, flush)
             }
         }
     }

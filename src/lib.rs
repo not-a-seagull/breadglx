@@ -8,7 +8,7 @@
 // but since we're already pinned to nightly, why not?
 #![feature(trait_alias)]
 #![cfg(all(not(target_os = "macos"), unix))]
-#![allow(non_snake_case)]
+#![allow(non_snake_case, unused_unsafe)]
 
 pub(crate) mod auto;
 pub(crate) mod cstr;

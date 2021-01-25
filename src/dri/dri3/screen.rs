@@ -3,7 +3,9 @@
 use super::{super::ExtensionContainer, Dri3Context, Dri3Drawable};
 use crate::{
     config::{GlConfig, GLX_FBCONFIG_ID},
-    context::{dispatch::ContextDispatch, GlContext, GlContextRule, InnerGlContext},
+    context::{
+        dispatch::ContextDispatch, promote_anyarc_ref, GlContext, GlContextRule, InnerGlContext,
+    },
     cstr::{const_cstr, ConstCstr},
     display::{DisplayDispatch, DisplayLike, GlDisplay},
     dll::Dll,
@@ -527,13 +529,37 @@ where
     #[inline]
     fn swap_buffers(
         &self,
+        dpy: &GlDisplay<Dpy>,
         drawable: Drawable,
         target_msc: i64,
         divisor: i64,
         remainder: i64,
         flush: bool,
     ) -> breadx::Result {
-        unimplemented!()
+        if let Some(ref context) = GlContext::<Dpy>::get()
+            .as_ref()
+            .and_then(|m| promote_anyarc_ref(m))
+        {
+            if let ContextDispatch::Dri3(d3) = context.dispatch() {
+                let drawable = self.fetch_dri_drawable(dpy, d3, drawable)?;
+                let mut flush_flags = ffi::__DRI2_FLUSH_DRAWABLE;
+                if flush {
+                    flush_flags |= ffi::__DRI2_FLUSH_CONTEXT;
+                }
+                return drawable.swap_buffers_msc(
+                    target_msc,
+                    divisor,
+                    remainder,
+                    flush_flags,
+                    &[],
+                    false,
+                );
+            }
+        }
+
+        Err(breadx::BreadError::StaticMsg(
+            "Unable to get context for swapping buffer",
+        ))
     }
 }
 
@@ -564,14 +590,19 @@ where
     }
 
     #[inline]
-    fn swap_buffers_async<'future>(
-        &'future self,
+    fn swap_buffers_async<'future, 'a, 'b>(
+        &'a self,
+        dpy: &'b GlDisplay<Dpy>,
         drawable: Drawable,
         target_msc: i64,
         divisor: i64,
         remainder: i64,
         flush: bool,
-    ) -> GenericFuture<'future, breadx::Result> {
+    ) -> GenericFuture<'future, breadx::Result>
+    where
+        'a: 'future,
+        'b: 'future,
+    {
         Box::pin(async { unimplemented!() })
     }
 }

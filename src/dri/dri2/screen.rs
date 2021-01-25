@@ -3,7 +3,7 @@
 use crate::{
     config::GlConfig,
     context::{dispatch::ContextDispatch, GlContext, GlContextRule, InnerGlContext},
-    display::DisplayLike,
+    display::{DisplayLike, GlDisplay},
     screen::GlInternalScreen,
 };
 use breadx::{Connection, Drawable};
@@ -37,6 +37,7 @@ where
     #[inline]
     fn swap_buffers(
         &self,
+        dpy: &GlDisplay<Dpy>,
         drawable: Drawable,
         target_msc: i64,
         divisor: i64,

@@ -3,7 +3,8 @@
 use crate::{
     config::{GlConfig, GlConfigRule},
     context::{
-        promote_anyarc_ref, dispatch::ContextDispatch, GlContext, GlContextRule, GlInternalContext, InnerGlContext,
+        dispatch::ContextDispatch, promote_anyarc_ref, GlContext, GlContextRule, GlInternalContext,
+        InnerGlContext,
     },
     display::{DisplayLike, GlDisplay},
     dri::{dri2, dri3},
@@ -46,6 +47,7 @@ pub(crate) trait GlInternalScreen<Dpy> {
     /// Swap the buffers for this screen's drawable.
     fn swap_buffers(
         &self,
+        display: &GlDisplay<Dpy>,
         drawable: Drawable,
         target_msc: i64,
         divisor: i64,
@@ -71,14 +73,18 @@ pub(crate) trait AsyncGlInternalScreen<Dpy> {
         'd: 'future,
         'e: 'future;
     /// Swap the buffers for this screen's drawable.
-    fn swap_buffers_async<'future>(
-        &'future self,
+    fn swap_buffers_async<'future, 'a, 'b>(
+        &'a self,
+        display: &'b GlDisplay<Dpy>,
         drawable: Drawable,
         target_msc: i64,
         divisor: i64,
         remainder: i64,
         flush: bool,
-    ) -> GenericFuture<'future, breadx::Result>;
+    ) -> GenericFuture<'future, breadx::Result>
+    where
+        'a: 'future,
+        'b: 'future;
 }
 
 impl<Dpy> GlScreen<Dpy> {
@@ -167,9 +173,7 @@ where
             .and_then(|m| promote_anyarc_ref::<Dpy>(m));
         // TODO: make this not true, and depend on whether the drawable's context is the current context
         let drawable = drawable.into();
-        self.disp.swap_buffers(drawable, 0, 0, 0, true)?;
-        // TODO: tag the context
-        dpy.display().swap_buffers(0, drawable)
+        self.disp.swap_buffers(dpy, drawable, 0, 0, 0, true)
     }
 
     /// Create an OpenGL context.

@@ -16,13 +16,15 @@ use crate::{
 use breadx::{
     auto::{
         dri3::{BufferFromPixmapReply, BuffersFromPixmapReply},
-        present::EventMask as PresentEventMask,
+        present::{self, EventMask as PresentEventMask},
+        randr::Crtc,
         sync::Fence,
+        xfixes::Region,
     },
     display::{Connection, Display, Modifiers},
     BreadError::StaticMsg,
     Drawable, Event, GcParameters, Gcontext, Pixmap, PropMode, PropertyFormat, PropertyType,
-    Window,
+    Rectangle, Window,
 };
 use std::{
     cell::Cell,
@@ -117,6 +119,7 @@ pub struct DrawableState {
     max_num_back: usize,
     cur_blit_source: i32,
     have_fake_front: bool,
+    back_format: c_uint,
     buffers: [Option<Arc<Dri3Buffer>>; NUM_BUFFERS],
 }
 
@@ -136,7 +139,7 @@ pub struct Dri3Buffer {
     // we need to reallocate
     reallocate: bool,
 
-    busy: i32,
+    busy: AtomicI32,
     pixmap: Pixmap,
     own_pixmap: bool,
     last_swap: AtomicU64,
@@ -397,6 +400,11 @@ impl<Dpy> Dri3Drawable<Dpy> {
     }
 
     #[inline]
+    pub fn have_fake_front(&self) -> bool {
+        self.has_fake_front.load(Ordering::SeqCst)
+    }
+
+    #[inline]
     pub fn set_have_fake_front(&self, val: bool) {
         self.has_fake_front.store(val, Ordering::SeqCst)
     }
@@ -486,6 +494,9 @@ impl<Dpy> Dri3Drawable<Dpy> {
             }
             // XCB_PRESENT_COMPLETE_NOTIFY
             1 => {
+                // TODO: figure out why we only get 40 bytes for this event
+                return Ok(false);
+
                 // serial is at bytes 20 to 24
                 let serial = u32::from_ne_bytes([
                     geti!(bytes, 20),
@@ -493,9 +504,10 @@ impl<Dpy> Dri3Drawable<Dpy> {
                     geti!(bytes, 22),
                     geti!(bytes, 23),
                 ]);
-                // ust is at bytes 25 thru 32
+                log::trace!("Bytes has a length of {}", bytes.len());
+                // ust is at bytes 24 thru 32
                 let mut ust = [0; 8];
-                ust.copy_from_slice(&bytes[25..32]);
+                ust.copy_from_slice(&bytes[24..32]);
                 let ust = i64::from_ne_bytes(ust);
                 // mst is at bytes 36 thru 44
                 let mut msc = [0; 8];
@@ -551,7 +563,7 @@ impl<Dpy> Dri3Drawable<Dpy> {
                 state.buffers.iter_mut().for_each(|buffer| {
                     if let Some(buffer) = buffer.as_mut() {
                         if buffer.pixmap == pixmap {
-                            Arc::get_mut(buffer).unwrap().busy = 0;
+                            buffer.busy.store(0, Ordering::Relaxed);
                         }
                     }
                 });
@@ -634,6 +646,30 @@ impl<Dpy: DisplayLike> Dri3Drawable<Dpy> {
             .map(|event| self.process_present_event(state_lock, event))
             .collect::<breadx::Result<Vec<bool>>>()?;
         Ok(needs_invalidate.iter().any(|b| *b))
+    }
+
+    #[inline]
+    pub fn flush(&self, flags: c_uint, throttle_reason: ffi::__DRI2throttleReason) {
+        log::trace!("Entering scope for flush");
+
+        // get the context and run flush_with_flags on it
+        if let Some(ref ctx) = GlContext::<Dpy>::get()
+            .as_ref()
+            .and_then(|m| promote_anyarc_ref::<Dpy>(m))
+        {
+            if let ContextDispatch::Dri3(d3) = ctx.dispatch() {
+                unsafe {
+                    ((&*self.screen().inner.flush)
+                        .flush_with_flags
+                        .expect("flush_with_flags not present"))(
+                        d3.dri_context().as_ptr(),
+                        self.drawable.as_ptr(),
+                        flags,
+                        throttle_reason,
+                    )
+                };
+            }
+        }
     }
 }
 
@@ -798,7 +834,7 @@ where
     }
 
     #[inline]
-    fn swapbuffer_barrier(&self) -> breadx::Result<()> {
+    pub fn swapbuffer_barrier(&self) -> breadx::Result<()> {
         self.wait_for_sbc(None)?;
         Ok(())
     }
@@ -837,7 +873,7 @@ where
                 );
                 if state.as_mut().unwrap().buffers[id]
                     .as_ref()
-                    .map(|b| b.busy == 0)
+                    .map(|b| b.busy.load(Ordering::Relaxed) == 0)
                     .unwrap_or(true)
                 {
                     state.as_mut().unwrap().cur_back = id;
@@ -853,6 +889,74 @@ where
                 self.wait_for_event(state)?;
             }
         }
+    }
+
+    /// Find an open back buffer slot and allocate if we need one.
+    #[inline]
+    fn find_back_alloc(&self) -> breadx::Result<Arc<Dri3Buffer>> {
+        log::trace!("Entering scope for find_back_alloc");
+
+        // first, get the ID we are using
+        let conn = self.display.display();
+        let mut state = self.state();
+        let back_format = state.back_format;
+        let mut state = Some(state);
+        let id = self.find_back(conn, &mut state)?;
+
+        let width = self.width.load(Ordering::Relaxed);
+        let height = self.height.load(Ordering::Relaxed);
+
+        let mut state = state.unwrap();
+        let buffer = match state.buffers[id].as_ref().cloned() {
+            Some(buffer) => {
+                mem::drop(state);
+                buffer
+            }
+            None => {
+                mem::drop(state);
+                self.update()?;
+                let buffer = Dri3Buffer::new(
+                    self,
+                    back_format,
+                    width,
+                    height,
+                    self.depth.load(Ordering::Relaxed),
+                )?;
+                let mut state = self.state();
+                state.buffers[id] = Some(buffer.clone());
+                buffer
+            }
+        };
+
+        let mut state = self.state();
+        if state.cur_blit_source != -1 && state.buffers[state.cur_blit_source as usize].is_some() {
+            let source = state.buffers[state.cur_blit_source as usize]
+                .as_ref()
+                .cloned()
+                .unwrap();
+            if !Arc::ptr_eq(&source, &buffer) {
+                let mut conn = self.display.display();
+                block_on_fence(&mut conn, Some(self), &source)?;
+                block_on_fence(&mut conn, Some(self), &buffer)?;
+                self.blit_images(
+                    ImgPtr(buffer.image),
+                    ImgPtr(source.image),
+                    0,
+                    0,
+                    width.into(),
+                    height.into(),
+                    0,
+                    0,
+                    0,
+                )?;
+                buffer
+                    .last_swap
+                    .store(source.last_swap.load(Ordering::Acquire), Ordering::Release);
+                state.cur_blit_source = -1;
+            }
+        }
+
+        Ok(buffer)
     }
 
     /// Blit two images associated with this drawable.
@@ -950,11 +1054,190 @@ where
         Ok(())
     }
 
+    /// Swap our buffers.
     #[inline]
-    fn buffer_id(&self, ty: BufferType) -> breadx::Result<usize> {
+    pub fn swap_buffers_msc(
+        &self,
+        mut target_msc: i64,
+        divisor: i64,
+        mut remainder: i64,
+        flush_flags: c_uint,
+        rects: &[c_int],
+        force_copy: bool,
+    ) -> breadx::Result {
+        log::trace!("Entering scope for swap_buffers_msc");
+
+        let mut options = present::Option_::default();
+
+        // 1). Flush our drawable using flush_with_flags before anything else.
+        self.flush(
+            flush_flags,
+            ffi::__DRI2throttleReason___DRI2_THROTTLE_SWAPBUFFER,
+        );
+
+        // 2). Allocate a back buffer for usage.
+        let buffer = self.find_back_alloc();
+
+        let width = self.width.load(Ordering::Relaxed);
+        let height = self.height.load(Ordering::Relaxed);
+
+        // TODO: adaptive sync
+
+        // 3). If we're using a linear buffer, copy from the linear buffer to the main buffer.
+        if self.is_different_gpu {
+            if let Ok(ref buffer) = buffer {
+                self.blit_images(
+                    ImgPtr(buffer.linear_buffer.unwrap()),
+                    ImgPtr(buffer.image),
+                    0,
+                    0,
+                    width.into(),
+                    height.into(),
+                    0,
+                    0,
+                    ffi::__BLIT_FLAG_FLUSH as _,
+                )?;
+            }
+        }
+
+        let mut state = self.state();
+        if self.swap_method != ffi::__DRI_ATTRIB_SWAP_UNDEFINED as _ || force_copy {
+            state.cur_blit_source = back_id(state.cur_back) as c_int;
+        }
+
+        // 4). Exchange the back and the fake front.
+        if self.have_fake_front() {
+            if let Ok(ref buffer) = buffer {
+                let b = back_id(state.cur_back);
+                state.buffers.swap(b, FRONT_ID);
+
+                if self.swap_method == ffi::__DRI_ATTRIB_SWAP_COPY as _ || force_copy {
+                    state.cur_blit_source = FRONT_ID as _;
+                }
+            }
+        }
+
+        // 5). Flush any present events we've picked up.
+        let mut conn = self.display.display();
+        self.process_present_events(&mut conn, &mut state)?;
+
+        if !self.is_pixmap.load(Ordering::Relaxed) {
+            if let Ok(ref buffer) = buffer {
+                reset_fence(buffer.shm_fence);
+
+                log::trace!("Calculating sbc...");
+                state.send_sbc += 1;
+                if target_msc == 0 && divisor == 0 && remainder == 0 {
+                    target_msc = state
+                        .msc
+                        .wrapping_add(self.swap_interval.load(Ordering::Relaxed).abs() as i64)
+                        .wrapping_add((state.send_sbc as i64).wrapping_sub(state.recv_sbc as i64));
+                } else if divisor == 0 && remainder == 0 {
+                    remainder = 0;
+                }
+
+                if self.swap_interval.load(Ordering::Relaxed) <= 0 {
+                    options.set_async_(true);
+                }
+
+                if self.has_blit_image() && state.cur_blit_source != -1 {
+                    options.set_copy(true);
+                }
+
+                if self.multiplanes_available {
+                    options.set_suboptimal(true);
+                }
+
+                buffer.busy.store(1, Ordering::Relaxed);
+                buffer.last_swap.store(state.send_sbc, Ordering::Relaxed);
+
+                let mut region = Region::const_from_xid(0);
+                let rectangles = rects
+                    .chunks_exact(4)
+                    .map(|sl| Rectangle {
+                        x: sl[0] as _,
+                        y: height as i16 - sl[1] as i16 - sl[3] as i16,
+                        width: sl[2] as _,
+                        height: sl[3] as _,
+                    })
+                    .collect::<Vec<Rectangle>>();
+
+                if !rectangles.is_empty() {
+                    region = conn
+                        .create_region(rectangles)
+                        .unwrap_or(Region::const_from_xid(0));
+                }
+
+                // Present the pixmap.
+                conn.present_pixmap(
+                    Window::const_from_xid(self.x_drawable.xid),
+                    buffer.pixmap,
+                    state.send_sbc as _, // truncate it
+                    Region::const_from_xid(0),
+                    region,
+                    0,
+                    0,
+                    Crtc::const_from_xid(0),
+                    Fence::const_from_xid(0),
+                    buffer.sync_fence,
+                    options.inner as _,
+                    target_msc as _,
+                    divisor as _,
+                    remainder as _,
+                    vec![],
+                )?;
+
+                if region.xid != 0 {
+                    region.destroy(&mut conn)?;
+                }
+
+                // Make sure we have a server-side blit operation if we need it.
+                if self.has_blit_image()
+                    && state.cur_blit_source != -1
+                    && state.cur_blit_source as usize != back_id(state.cur_back)
+                {
+                    let new_back = state.buffers[back_id(state.cur_back)]
+                        .as_ref()
+                        .cloned()
+                        .unwrap();
+                    let source = state.buffers[state.cur_blit_source as usize]
+                        .as_ref()
+                        .cloned()
+                        .unwrap();
+
+                    reset_fence(new_back.shm_fence);
+                    let gc = self.drawable_gc(&mut conn)?;
+                    conn.copy_area(
+                        source.pixmap,
+                        new_back.pixmap,
+                        gc,
+                        0,
+                        0,
+                        width,
+                        height,
+                        0,
+                        0,
+                    )?;
+                    trigger_fence::<Dpy>(&mut conn, new_back.sync_fence)?;
+                    new_back
+                        .last_swap
+                        .store(source.last_swap.load(Ordering::Relaxed), Ordering::Relaxed);
+                }
+            }
+        }
+
+        self.invalidate();
+        Ok(())
+    }
+
+    #[inline]
+    fn buffer_id(&self, ty: BufferType, format: Option<c_uint>) -> breadx::Result<usize> {
         Ok(match ty {
             BufferType::Back => {
                 let mut state = Some(self.state());
+                if let Some(format) = format {
+                    state.as_mut().unwrap().back_format = format;
+                }
                 self.find_back(self.display.display(), &mut state)?
             }
             BufferType::Front => FRONT_ID,
@@ -970,7 +1253,7 @@ where
     ) -> breadx::Result<Arc<Dri3Buffer>> {
         log::trace!("Entering scope for get_buffer");
 
-        let buf_id = self.buffer_id(buffer_type)?;
+        let buf_id = self.buffer_id(buffer_type, Some(format))?;
 
         // see if there is a buffer; if there isn't a buffer (or if there is, but it's wrong),
         // rellocate it
@@ -1161,7 +1444,7 @@ where
     ) -> breadx::Result<Arc<Dri3Buffer>> {
         log::trace!("Entering scope for get_pixmap_buffer");
 
-        let buf_id = self.buffer_id(buffer_type)?;
+        let buf_id = self.buffer_id(buffer_type, None)?;
         if let Some(buffer) = self.state().buffers[buf_id].as_ref().cloned() {
             return Ok(buffer);
         }
@@ -1269,7 +1552,7 @@ where
                     shm_fence,
                     pixmap,
                     own_pixmap: false,
-                    busy: 0,
+                    busy: AtomicI32::new(0),
                     reallocate: false,
                     cpp: 0,
                     modifier: 0,
@@ -1870,7 +2153,7 @@ impl Dri3Buffer {
                     cpp,
                     modifier,
                     reallocate: false,
-                    busy: 0,
+                    busy: AtomicI32::new(0),
                     width,
                     height,
                     last_swap: AtomicU64::new(0),

@@ -2,16 +2,19 @@
 
 use breadglx::{GlConfigRule, GlContextRule, GlDisplay, GlVisualType};
 use breadx::{
-    ColormapAlloc, DisplayConnection, EventMask, Pixmap, Result, VisualClass, WindowClass,
-    WindowParameters,
+    auto::xproto::ExposeEvent, ColormapAlloc, DisplayConnection, Event, EventMask,
+    Pixmap, Result, VisualClass, WindowClass, WindowParameters,
 };
 use log::LevelFilter;
-use std::{io::Write, env, mem};
+use std::{env, io::Write, mem, thread, time::Duration};
+
+// This code is a rough translate of the following:
+// https://www.khronos.org/opengl/wiki/Tutorial:_OpenGL_3.0_Context_Creation_(GLX)
 
 fn main() -> Result<()> {
     env_logger::Builder::new()
         .filter(Some("breadx"), LevelFilter::Warn)
-        .filter(Some("breadglx"), LevelFilter::Info)
+        .filter(Some("breadglx"), LevelFilter::Trace)
         .init();
 
     // establish a connection, wrap it in a GlDisplay, and use that to produce a GlScreen
@@ -20,11 +23,6 @@ fn main() -> Result<()> {
     let root = conn.display().default_screen().root;
     let root_index = conn.display().default_screen_index();
     let mut screen = conn.create_screen(root_index)?;
-
-    let extinfo = conn
-        .display()
-        .query_extension_immediate("GLX".to_string())?;
-    println!("Glx Extension: {:?}", &extinfo);
 
     // find the ideal framebuffer config for our use
     const FBCONFIG_RULES: &[GlConfigRule] = &[
@@ -38,7 +36,7 @@ fn main() -> Result<()> {
         GlConfigRule::DepthBits(24),
         GlConfigRule::StencilBits(8),
         GlConfigRule::DoubleBufferMode(1),
-        //        GlConfigRule::XRenderable(1),
+        GlConfigRule::XRenderable(1),
     ];
 
     let fbconfig = screen
@@ -63,7 +61,9 @@ fn main() -> Result<()> {
         colormap: Some(cmap),
         background_pixmap: Some(Pixmap::const_from_xid(0)),
         border_pixel: Some(0),
-        event_mask: Some(EventMask::STRUCTURE_NOTIFY),
+        event_mask: Some(
+            EventMask::STRUCTURE_NOTIFY | EventMask::EXPOSURE | EventMask::BUTTON_PRESS,
+        ),
         ..Default::default()
     };
     let win = dpy.create_window(
@@ -82,6 +82,8 @@ fn main() -> Result<()> {
     // set up the window's properties
     win.set_title(&mut *dpy, "BreadGLX Demonstration")?;
     win.map(&mut *dpy)?;
+    let wdw = dpy.intern_atom_immediate("WM_DELETE_WINDOW".to_string(), false)?;
+    win.set_wm_protocols(&mut *dpy, &[wdw])?;
 
     // drop the mutex lock
     mem::drop(dpy);
@@ -101,12 +103,12 @@ fn main() -> Result<()> {
                 GlContextRule::MinorVersion(0),
             ];
 
-            screen.create_context(&mut conn, &fbconfig, FALLBACK_CONTEXT_RULES, None)?
+            screen.create_context(&conn, &fbconfig, FALLBACK_CONTEXT_RULES, None)?
         }
     };
 
     // bind the current context
-    context.bind(&mut conn, win)?;
+    context.bind(&conn, win)?;
 
     // use the get proc address function as a way of getting GL functions for whatever interface
     // we end up using.
@@ -120,14 +122,40 @@ fn main() -> Result<()> {
         }
     });
 
-    // SAFETY: We are most likely calling GL primitives here.
-    unsafe {
-        gl::ClearColor(0.0, 0.5, 1.0, 1.0);
-        gl::Clear(gl::COLOR_BUFFER_BIT);
-    }
+    let mut color = [1.0f32; 3];
+    loop {
+        // Note: make sure not to hold onto the mutex for too long, since Gl functions
+        //       need it
+        let event = conn.display().wait_for_event()?;
+        let mut render = false;
 
-    // swap buffers
-    screen.swap_buffers(&conn, win)?;
+        match event {
+            Event::Expose(e) => {
+                render = true;
+            }
+            Event::ButtonPress(_) => {
+                render = true;
+                color = [fastrand::f32(), fastrand::f32(), fastrand::f32()];
+            }
+            Event::ClientMessage(cme) => {
+                if cme.data.longs()[0] == wdw.xid {
+                    break;
+                }
+            }
+            _ => (),
+        }
+
+        if render {
+            // Render the OpenGL to the screen
+            // SAFETY: We are most likely calling GL primitives here
+            unsafe {
+                gl::ClearColor(color[0], color[1], color[2], 1.0);
+                gl::Clear(gl::COLOR_BUFFER_BIT);
+            }
+
+            screen.swap_buffers(&conn, win)?;
+        }
+    }
 
     Ok(())
 }
