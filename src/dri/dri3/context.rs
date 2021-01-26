@@ -16,6 +16,7 @@ use breadx::{
 };
 use std::{
     ffi::{c_void, CStr},
+    fmt,
     os::raw::c_uint,
     ptr::{self, NonNull},
     sync::{
@@ -35,13 +36,20 @@ use futures_lite::future;
 // it's useful to assign each context a context ID
 static CONTEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
-#[derive(Debug)]
 struct Dri3ContextInner<Dpy> {
     dri_context: NonNull<ffi::__DRIcontext>,
     // Dri3Screen is wrapped in an Arc, we can keep a sneaky reference here
     screen: Dri3Screen<Dpy>,
     fbconfig: GlConfig,
     context_id: usize,
+    dropper: fn(&mut Dri3ContextInner<Dpy>),
+}
+
+impl<Dpy> fmt::Debug for Dri3ContextInner<Dpy> {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Dri3ContextInner")
+    }
 }
 
 #[derive(Debug)]
@@ -70,6 +78,7 @@ impl<Dpy: Send + Sync + 'static> Dri3Context<Dpy> {
         rules: &[GlContextRule],
         share: Option<&GlContext<Dpy>>,
         base: &Arc<InnerGlContext<Dpy>>,
+        dropper: fn(&mut Dri3ContextInner<Dpy>),
     ) -> breadx::Result<Dri3Context<Dpy>> {
         // convert the rules to the appropriate set of DRI rules
         let rules = convert_dri_rules(rules)?;
@@ -97,7 +106,8 @@ impl<Dpy: Send + Sync + 'static> Dri3Context<Dpy> {
                 &mut error,
                 // This isn't *that* horribly unsafe if you think about it
                 // See screen.rs for more info
-                &**base as *const InnerGlContext<Dpy> as *mut InnerGlContext<Dpy> as *mut c_void,
+                Arc::as_ptr(&base) as *const InnerGlContext<Dpy> as *mut InnerGlContext<Dpy>
+                    as *mut c_void,
             )
         };
 
@@ -109,6 +119,7 @@ impl<Dpy: Send + Sync + 'static> Dri3Context<Dpy> {
                 screen,
                 fbconfig,
                 context_id: CONTEXT_ID.fetch_add(1, Ordering::AcqRel),
+                dropper,
             }),
         })
     }
@@ -153,6 +164,7 @@ impl<Dpy: Send + Sync + 'static> Dri3Context<Dpy> {
 
     #[inline]
     fn unbind_internal(&self) {
+        // SAFETY: even if this function goes wrong, it's not like it has much of an effect.
         unsafe {
             ((*self.screen().inner.core)
                 .unbindContext
@@ -173,7 +185,14 @@ where
         share: Option<&GlContext<Dpy>>,
         base: &mut Arc<InnerGlContext<Dpy>>,
     ) -> breadx::Result<Dri3Context<Dpy>> {
-        Self::new_internal(scr.clone(), fbconfig.clone(), rules, share, base)
+        Self::new_internal(
+            scr.clone(),
+            fbconfig.clone(),
+            rules,
+            share,
+            base,
+            Dropper::<Dpy>::sync_dropper,
+        )
     }
 }
 
@@ -196,8 +215,17 @@ where
         let rules = rules.to_vec();
         let share = share.cloned();
         let base = base.clone();
-        blocking::unblock(move || Self::new_internal(scr, fbconfig, &rules, share.as_ref(), &base))
-            .await
+        blocking::unblock(move || {
+            Self::new_internal(
+                scr,
+                fbconfig,
+                &rules,
+                share.as_ref(),
+                &base,
+                Dropper::<Dpy>::async_dropper,
+            )
+        })
+        .await
     }
 }
 
@@ -383,9 +411,20 @@ where
     }
 }
 
-impl<Dpy> Drop for Dri3Context<Dpy> {
+struct Dropper<Dpy>(Dpy);
+
+impl<Dpy: DisplayLike> Dropper<Dpy>
+where
+    Dpy::Connection: Connection,
+{
+    fn sync_dropper(this: &mut Dri3ContextInner<Dpy>) {
+        unsafe { ((&*this.screen.inner.core).destroyContext.unwrap())(this.dri_context.as_ptr()) }
+    }
+}
+
+impl<Dpy> Drop for Dri3ContextInner<Dpy> {
     #[inline]
     fn drop(&mut self) {
-        // TODO
+        (self.dropper)(self)
     }
 }

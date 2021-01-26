@@ -30,6 +30,7 @@ use std::{
     cell::Cell,
     cmp,
     ffi::c_void,
+    fmt,
     future::Future,
     hint, iter,
     mem::{self, MaybeUninit},
@@ -61,7 +62,6 @@ use once_cell::sync::Lazy;
 #[cfg(not(feature = "async"))]
 use std::sync::MutexGuard;
 
-#[derive(Debug)]
 pub struct Dri3Drawable<Dpy> {
     drawable: NonNull<ffi::__DRIdrawable>,
     x_drawable: Drawable,
@@ -102,6 +102,14 @@ pub struct Dri3Drawable<Dpy> {
     state: async_lock::Mutex<DrawableState>,
 
     display: GlDisplay<Dpy>, // cloned reference to display
+    dropper: fn(&mut Dri3Drawable<Dpy>),
+}
+
+impl<Dpy> fmt::Debug for Dri3Drawable<Dpy> {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Dri3Drawable")
+    }
 }
 
 #[derive(Debug, Default)]
@@ -732,6 +740,7 @@ where
             swap_method: swap_method as _,
             has_fake_front: AtomicBool::new(false),
             has_back: AtomicBool::new(true),
+            dropper: Dropper::<Dpy>::sync_dropper,
             #[cfg(feature = "async")]
             state: async_lock::Mutex::new(Default::default()),
             #[cfg(not(feature = "async"))]
@@ -2597,10 +2606,31 @@ const fn image_format_to_fourcc(format: c_uint) -> c_int {
     }
 }
 
+struct Dropper<Dpy>(Dpy);
+
+impl<Dpy: DisplayLike> Dropper<Dpy> where Dpy::Connection: Connection {
+    fn sync_dropper(this: &mut Dri3Drawable<Dpy>) {
+        // first, free our render buffer
+        // this shouldn't fault, since we've assured drawables are
+        // always dropped first
+        let screen = this.screen();
+        unsafe { ((&*screen.inner.core).destroyDrawable.unwrap())(this.drawable.as_ptr()) };
+
+        // drop all of our buffers
+        #[cfg(not(feature = "async"))]
+        let state = this.state.get_mut().unwrap();
+        #[cfg(feature = "async")]
+        let state = this.state.get_mut();
+        (mem::take(&mut state.buffers)).iter_mut().for_each(|s| if let Some(buffer) = mem::take(s) {
+            free_buffer_arc(buffer, this).unwrap();
+        });
+    }
+}
+
 impl<Dpy> Drop for Dri3Drawable<Dpy> {
     #[inline]
     fn drop(&mut self) {
-        // TODO
+        (self.dropper)(self)
     }
 }
 

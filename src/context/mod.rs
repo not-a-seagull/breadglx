@@ -168,6 +168,19 @@ impl<Dpy: DisplayLike> GlContext<Dpy>
 where
     Dpy::Connection: Connection,
 {
+    /// Unbind the current context.
+    #[inline]
+    pub fn unbind() -> breadx::Result {
+        let old_gc = take_current_context();
+        let old_gc = old_gc.and_then(|m| promote_anyarc::<Dpy>(m));
+
+        if let Some(old_gc) = old_gc {
+            old_gc.inner.inner.unbind()
+        } else {
+            Ok(())
+        }
+    }
+
     #[inline]
     fn bind_internal(
         &self,

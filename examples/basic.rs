@@ -1,9 +1,9 @@
 // MIT/Apache2 License
 
-use breadglx::{GlConfigRule, GlContextRule, GlDisplay, GlVisualType};
+use breadglx::{GlConfigRule, GlContextRule, GlDisplay, GlVisualType, GlContext};
 use breadx::{
-    auto::xproto::ExposeEvent, ColormapAlloc, DisplayConnection, Event, EventMask,
-    Pixmap, Result, VisualClass, WindowClass, WindowParameters,
+    auto::xproto::ExposeEvent, ColormapAlloc, DisplayConnection, Event, EventMask, Pixmap, Result,
+    VisualClass, WindowClass, WindowParameters,
 };
 use log::LevelFilter;
 use std::{env, io::Write, mem, thread, time::Duration};
@@ -156,6 +156,9 @@ fn main() -> Result<()> {
             screen.swap_buffers(&conn, win)?;
         }
     }
+
+    // As we exit, unbind the context to let everything drop.
+    GlContext::<DisplayConnection>::unbind()?;
 
     Ok(())
 }

@@ -19,9 +19,11 @@ use std::{
     cell::UnsafeCell,
     collections::HashMap,
     ffi::{c_void, CStr},
+    fmt,
     hash::{Hash, Hasher},
+    mem::ManuallyDrop,
     os::raw::c_int,
-    ptr::{self, NonNull},
+    ptr::{self, raw_const, NonNull},
     sync::{Arc, Weak},
 };
 
@@ -67,7 +69,6 @@ impl<Dpy> WeakDri3ScreenRef<Dpy> {
     }
 }
 
-#[derive(Debug)]
 pub struct Dri3ScreenInner<Dpy> {
     // the library loaded for the DRI layer
     driver: Dll,
@@ -83,7 +84,7 @@ pub struct Dri3ScreenInner<Dpy> {
     dri_configmap: Option<HashMap<u64, NonNull<ffi::__DRIconfig>>>,
 
     // a map matching X11 drawables to DRI3 drawables
-    drawable_map: DashMap<Drawable, Arc<Dri3Drawable<Dpy>>>,
+    drawable_map: ManuallyDrop<DashMap<Drawable, Arc<Dri3Drawable<Dpy>>>>,
 
     // store the fbconfigs and visualinfos in here as well
     fbconfigs: Arc<[GlConfig]>,
@@ -100,6 +101,16 @@ pub struct Dri3ScreenInner<Dpy> {
     interop: *const ffi::__DRI2interopExtension,
 
     driver_configs: *mut *const ffi::__DRIconfig,
+
+    // specialized dropper mechanism
+    dropper: fn(&mut Dri3ScreenInner<Dpy>),
+}
+
+impl<Dpy> fmt::Debug for Dri3ScreenInner<Dpy> {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Dri3ScreenInner")
+    }
 }
 
 unsafe impl<Dpy: Send> Send for Dri3ScreenInner<Dpy> {}
@@ -301,9 +312,10 @@ where
             interop: ptr::null(),
             driver_configs: ptr::null_mut(),
             dri_configmap: None,
-            drawable_map: DashMap::new(),
+            drawable_map: ManuallyDrop::new(DashMap::new()),
             fbconfigs: fbconfigs.clone(),
             visuals: visuals.clone(),
+            dropper: Dropper::<Dpy>::sync_dropper,
         });
 
         // use the image driver to actually create the screen
@@ -387,6 +399,7 @@ where
             drawable_map: DashMap::new(),
             fbconfigs: fbconfigs.clone(),
             visuals: visuals.clone(),
+            dropper: &async_dropper,
         });
 
         // use the image driver to actually create the screen
@@ -607,19 +620,35 @@ where
     }
 }
 
-impl<Dpy> Drop for Dri3ScreenInner<Dpy> {
-    #[inline]
-    fn drop(&mut self) {
+struct Dropper<Dpy>(Dpy);
+
+impl<Dpy: DisplayLike> Dropper<Dpy>
+where
+    Dpy::Connection: Connection,
+{
+    fn sync_dropper(screen: &mut Dri3ScreenInner<Dpy>) {
+        // SAFETY: The drawables require access to the extensions contained within the screen
+        //         so we make sure we destroy them first. None of the functions below use the drawables
+        //         set.
+        unsafe { ManuallyDrop::drop(&mut screen.drawable_map) };
+
         // destroy the screen
-        if let Some(destroy_screen) = unsafe { *self.core }.destroyScreen.take() {
-            unsafe { (destroy_screen)(self.dri_screen.unwrap().as_ptr()) };
+        if let Some(destroy_screen) = unsafe { *screen.core }.destroyScreen.take() {
+            unsafe { (destroy_screen)(screen.dri_screen.unwrap().as_ptr()) };
         }
 
         // drop the configurations
-        unsafe { iter_configs(self.driver_configs, |ext| libc::free(ext as *mut _)) };
-        unsafe { libc::free(self.driver_configs as *mut _) };
+        unsafe { iter_configs(screen.driver_configs, |ext| libc::free(ext as *mut _)) };
+        unsafe { libc::free(screen.driver_configs as *mut _) };
 
-        unsafe { libc::close(self.fd) };
+        unsafe { libc::close(screen.fd) };
+    }
+}
+
+impl<Dpy> Drop for Dri3ScreenInner<Dpy> {
+    #[inline]
+    fn drop(&mut self) {
+        (self.dropper)(self)
     }
 }
 
