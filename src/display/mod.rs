@@ -312,17 +312,29 @@ where
         if stats.direct && stats.accel {
             #[cfg(feature = "dri3")]
             if !stats.no_dri3 {
-                context = dri::dri3::Dri3Display::new(dpy.display_mut())
-                    .ok()
-                    .map(|x| x.into());
+                context = match dri::dri3::Dri3Display::new(dpy.display_mut()) {
+                    Ok(ctx) => Some(ctx.into()),
+                    Err(e) => {
+                        log::error!("Unable to create DRI3 context: {:?}", e);
+                        None
+                    }
+                };
+            } else {
+                log::info!("Skipping DRI3 Initialization");
             }
 
             // try again with dri2 if we can't do dri3
             if context.is_none() && !stats.no_dri2 {
-                context = dri::dri2::Dri2Display::new(dpy.display_mut())
-                    .ok()
-                    .map(|x| x.into());
+                context = match dri::dri2::Dri2Display::new(dpy.display_mut()) {
+                    Ok(ctx) => Some(ctx.into()),
+                    Err(e) => {
+                        log::error!("Unable to create DRI2 context: {:?}", e);
+                        None
+                    }
+                };
             }
+        } else {
+            log::info!("Skipping DRI3/DRI2 Initialization");
         }
 
         let context = match context {

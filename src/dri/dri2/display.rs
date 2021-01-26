@@ -26,7 +26,7 @@ impl<Dpy> fmt::Debug for Dri2Display<Dpy> {
 impl<Dpy: DisplayLike> Dri2Display<Dpy> {
     #[inline]
     pub(crate) fn new(dpy: &mut Display<Dpy::Connection>) -> breadx::Result<Self> {
-        unimplemented!()
+        Err(breadx::BreadError::StaticMsg("Not supported"))
     }
 
     #[inline]

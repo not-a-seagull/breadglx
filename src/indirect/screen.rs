@@ -7,16 +7,31 @@ use crate::{
     screen::GlInternalScreen,
 };
 use breadx::{display::Connection, Drawable};
-use std::{marker::PhantomData, sync::Arc};
+use std::{fmt, marker::PhantomData, sync::Arc};
 
 #[cfg(feature = "async")]
 use crate::{screen::AsyncGlInternalScreen, util::GenericFuture};
 #[cfg(feature = "async")]
 use breadx::display::AsyncConnection;
 
-#[derive(Debug)]
 pub struct IndirectScreen<Dpy> {
-    p: PhantomData<Dpy>,
+    // As before, the indirect screen doesn't really have any
+    // attached data.
+    _private: PhantomData<Dpy>,
+}
+
+impl<Dpy> fmt::Debug for IndirectScreen<Dpy> {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("IndirectScreen")
+    }
+}
+
+impl<Dpy> IndirectScreen<Dpy> {
+    #[inline]
+    pub fn new() -> Self {
+        Self { _private: PhantomData }
+    }
 }
 
 impl<Dpy: DisplayLike> GlInternalScreen<Dpy> for IndirectScreen<Dpy>

@@ -1,23 +1,37 @@
 // MIT/Apache2 License
 
 use crate::{
-    context::{GlInternalContext, ProcAddress},
+    context::{Profile, GlInternalContext, ProcAddress},
     display::{DisplayLike, GlDisplay},
 };
 use breadx::{
     display::{Connection, Display},
     Drawable,
 };
-use std::ffi::CStr;
+use std::{fmt, ffi::CStr};
 
 #[cfg(feature = "async")]
 use crate::{context::AsyncGlInternalContext, util::GenericFuture};
 #[cfg(feature = "async")]
 use breadx::display::AsyncConnection;
 
-#[derive(Debug)]
 pub struct IndirectContext<Dpy> {
-    p: Dpy,
+    // hold a reference to the display so we can call commands
+    display: GlDisplay<Dpy>,
+    // the buffer to hold GLX commands in before we flush them
+    glx_buffer: Vec<u8>,
+    // attributes we take from the rules sections
+    render_type: u32,
+    major_version: u32,
+    minor_version: u32,
+    profile: Profile,
+}
+
+impl<Dpy> fmt::Debug for IndirectContext<Dpy> {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("IndirectContext")
+    }
 }
 
 impl<Dpy: DisplayLike> GlInternalContext<Dpy> for IndirectContext<Dpy>

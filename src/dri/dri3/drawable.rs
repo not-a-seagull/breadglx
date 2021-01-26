@@ -1,5 +1,31 @@
 // MIT/Apache2 License
 
+// This is largely taken from loader_dri3_helper.c of the Mesa3D project. Therefore, its
+// copyright notice is replicated below:
+/*
+ * Copyright © 2013 Keith Packard
+ * Copyright © 2015 Boyan Ding
+ *
+ * Permission to use, copy, modify, distribute, and sell this software and its
+ * documentation for any purpose is hereby granted without fee, provided that
+ * the above copyright notice appear in all copies and that both that copyright
+ * notice and this permission notice appear in supporting documentation, and
+ * that the name of the copyright holders not be used in advertising or
+ * publicity pertaining to distribution of the software without specific,
+ * written prior permission.  The copyright holders make no representations
+ * about the suitability of this software for any purpose.  It is provided "as
+ * is" without express or implied warranty.
+ *
+ * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
+ * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
+ * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
+ * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
+ * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+ * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
+ * OF THIS SOFTWARE.
+ */
+
+
 // TODO: this file is a literal trainwreck. seperate it into several files if possible, comment the
 //       whole thing, and maybe clean it all up
 
@@ -2608,7 +2634,10 @@ const fn image_format_to_fourcc(format: c_uint) -> c_int {
 
 struct Dropper<Dpy>(Dpy);
 
-impl<Dpy: DisplayLike> Dropper<Dpy> where Dpy::Connection: Connection {
+impl<Dpy: DisplayLike> Dropper<Dpy>
+where
+    Dpy::Connection: Connection,
+{
     fn sync_dropper(this: &mut Dri3Drawable<Dpy>) {
         // first, free our render buffer
         // this shouldn't fault, since we've assured drawables are
@@ -2621,8 +2650,10 @@ impl<Dpy: DisplayLike> Dropper<Dpy> where Dpy::Connection: Connection {
         let state = this.state.get_mut().unwrap();
         #[cfg(feature = "async")]
         let state = this.state.get_mut();
-        (mem::take(&mut state.buffers)).iter_mut().for_each(|s| if let Some(buffer) = mem::take(s) {
-            free_buffer_arc(buffer, this).unwrap();
+        (mem::take(&mut state.buffers)).iter_mut().for_each(|s| {
+            if let Some(buffer) = mem::take(s) {
+                free_buffer_arc(buffer, this).unwrap();
+            }
         });
     }
 }
