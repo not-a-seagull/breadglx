@@ -2,8 +2,8 @@
 
 use super::IndirectScreen;
 use crate::{
-    display::{DisplayLike, DisplayLock, GlInternalDisplay},
     config::GlConfig,
+    display::{DisplayLike, DisplayLock, GlInternalDisplay},
     screen::GlScreen,
 };
 use breadx::display::{Connection, Display};
@@ -59,7 +59,12 @@ where
         let visuals: Arc<[GlConfig]> = visuals.into_boxed_slice().into();
         let fbconfigs: Arc<[GlConfig]> = fbconfigs.into_boxed_slice().into();
 
-        Ok(GlScreen::from_indirect(index, fbconfigs, visuals, IndirectScreen::new()))
+        Ok(GlScreen::from_indirect(
+            index,
+            fbconfigs,
+            visuals,
+            IndirectScreen::new(),
+        ))
     }
 }
 
@@ -84,7 +89,12 @@ where
             let visuals: Arc<[GlConfig]> = visuals.into_boxed_slice().into();
             let fbconfigs: Arc<[GlConfig]> = fbconfigs.into_boxed_slice().into();
 
-            Ok(GlScreen::from_indirect(index, fbconfigs, visuals, IndirectScreen::new()))
+            Ok(GlScreen::from_indirect(
+                index,
+                fbconfigs,
+                visuals,
+                IndirectScreen::new(),
+            ))
         })
     }
 }

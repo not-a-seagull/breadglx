@@ -39,9 +39,10 @@ fn main() -> Result<()> {
         GlConfigRule::XRenderable(1),
     ];
 
+    // note: choose_fbconfigs is an iterator and thus we can use iterator methods
+    //       to get the most optimal framebuffer configuration
     let fbconfig = screen
         .choose_fbconfigs(FBCONFIG_RULES)
-        .into_iter()
         .max_by_key(|fbconfig| fbconfig.samples)
         .expect("Could not find valid framebuffer config");
 

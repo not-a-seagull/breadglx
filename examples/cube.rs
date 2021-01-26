@@ -46,7 +46,6 @@ fn main() -> Result {
 
     let fbconfig = screen
         .choose_fbconfigs(FBCONFIG_RULES)
-        .into_iter()
         .max_by_key(|fbconfig| fbconfig.samples)
         .expect("Could not find valid framebuffer config");
     let mut dpy = conn.display();

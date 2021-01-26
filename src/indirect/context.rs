@@ -1,14 +1,14 @@
 // MIT/Apache2 License
 
 use crate::{
-    context::{Profile, GlInternalContext, ProcAddress},
+    context::{GlInternalContext, ProcAddress, Profile},
     display::{DisplayLike, GlDisplay},
 };
 use breadx::{
     display::{Connection, Display},
     Drawable,
 };
-use std::{fmt, ffi::CStr};
+use std::{ffi::CStr, fmt};
 
 #[cfg(feature = "async")]
 use crate::{context::AsyncGlInternalContext, util::GenericFuture};

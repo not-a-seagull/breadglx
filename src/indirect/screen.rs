@@ -30,7 +30,9 @@ impl<Dpy> fmt::Debug for IndirectScreen<Dpy> {
 impl<Dpy> IndirectScreen<Dpy> {
     #[inline]
     pub fn new() -> Self {
-        Self { _private: PhantomData }
+        Self {
+            _private: PhantomData,
+        }
     }
 }
 
