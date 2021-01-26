@@ -136,8 +136,9 @@ fn main() -> Result {
     let program = load_shaders()?;
 
     // set up our MVP (Model, View, Projection) matrix.
-    let projection =
-        Matrix4::<f32>::new_perspective(width as f32 / height as f32, radians(45.0), 0.1, 100.0);
+    //let projection =
+    //    Matrix4::<f32>::new_perspective(width as f32 / height as f32, radians(45.0), 0.1, 100.0);
+    let projection = Matrix4::<f32>::identity();
     let mut camera_posn = Point3::new(10.0, 6.0, 6.0);
     let mut view = Matrix4::<f32>::look_at_rh(
         &camera_posn,
