@@ -27,6 +27,7 @@ memchr = "2.3.4"
 env_logger = { version = "0.8", default-features = false, features = ["atty", "termcolor"] }
 fastrand = "1.4.0"
 gl = "0.14.0"
+nalgebra = "0.24.0"
 
 [features]
 default = ["dri3"]
