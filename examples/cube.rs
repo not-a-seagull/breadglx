@@ -138,24 +138,16 @@ fn main() -> Result {
     // set up our MVP (Model, View, Projection) matrix.
     let projection =
         Matrix4::<f32>::new_perspective(width as f32 / height as f32, radians(45.0), 0.1, 100.0);
-    let view = Matrix4::<f32>::look_at_rh(
-        &Point3::new(4.0, 3.0, 3.0),
+    let mut camera_posn = Point3::new(10.0, 6.0, 6.0);
+    let mut view = Matrix4::<f32>::look_at_rh(
+        &camera_posn,
         &Point3::new(0.0, 0.0, 0.0),
         &Vector3::new(0.0, 1.0, 0.0),
     );
-    let model = Matrix4::<f32>::identity();
-    let mvp = projection * view * model;
-
-    println!(
-        "Point translated is: {:?}",
-        mvp * nalgebra::Point4::new(1.0, 1.0, 1.0, 1.0)
-    );
+    let model = Matrix4::<GLfloat>::identity();
 
     // make sure OpenGL knows about this matrix
-    unsafe {
-        let matrix_id = gl::GetUniformLocation(program, b"MVP\0".as_ptr() as *const _);
-        gl::UniformMatrix4fv(matrix_id, 1, gl::FALSE, mvp.as_ptr());
-    }
+    let matrix_id = unsafe { gl::GetUniformLocation(program, b"MVP\0".as_ptr() as *const _) };
 
     let mut back_color = [0.0f32; 3];
     let mut cube_color = [1.0f32; 3];
@@ -189,7 +181,16 @@ fn main() -> Result {
         }
 
         if do_render {
-            render(back_color, cube_color, vertex_buffer, program);
+            let mvp = projection * view * model;
+
+            render(
+                back_color,
+                cube_color,
+                &mvp,
+                matrix_id,
+                vertex_buffer,
+                program,
+            );
             screen.swap_buffers(&conn, win)?;
         }
     }
@@ -199,7 +200,14 @@ fn main() -> Result {
     Ok(())
 }
 
-fn render(back_color: [f32; 3], cube_color: [f32; 3], buffer: GLuint, program: GLuint) {
+fn render(
+    back_color: [f32; 3],
+    cube_color: [f32; 3],
+    matrix: &Matrix4<f32>,
+    matrix_id: GLint,
+    buffer: GLuint,
+    program: GLuint,
+) {
     // Use the program.
     unsafe { gl::UseProgram(program) };
 
@@ -213,6 +221,7 @@ fn render(back_color: [f32; 3], cube_color: [f32; 3], buffer: GLuint, program: G
     unsafe {
         let color_id = gl::GetUniformLocation(program, b"in_color\0".as_ptr() as *const _);
         gl::Uniform3fv(color_id, 1, cube_color.as_ptr());
+        gl::UniformMatrix4fv(matrix_id, 1, gl::TRUE, matrix.as_ptr());
     }
 
     // Draw our triangles
@@ -329,7 +338,7 @@ const VERTEX_SHADER: &[u8] = b"
 layout(location = 0) in vec3 vertexPosition;
 uniform mat4 MVP;
 
-void main() {
+void main() { 
   gl_Position = MVP * vec4(vertexPosition, 1);
 }
 \0";
