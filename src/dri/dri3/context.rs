@@ -360,16 +360,16 @@ where
             } else {
                 // invalidate the two drawables
                 if let Some(ref draw) = draw {
-                    Dri3Drawable::invalidate_async(draw.clone()).await;
+                    Dri3Drawable::invalidate_async(draw).await;
                 }
 
                 if let Some(read) = read {
                     if let Some(draw) = draw {
                         if !Arc::ptr_eq(&read, &draw) {
-                            Dri3Drawable::invalidate_async(read).await;
+                            Dri3Drawable::invalidate_async(&read).await;
                         }
                     } else {
-                        Dri3Drawable::invalidate_async(read).await;
+                        Dri3Drawable::invalidate_async(&read).await;
                     }
                 }
 
@@ -381,7 +381,7 @@ where
     #[inline]
     fn unbind_async<'future>(&'future self) -> GenericFuture<'future, breadx::Result> {
         let this = self.clone();
-        Box::pin(blocking::unblock(move || this.unbind_internal()))
+        Box::pin(blocking::unblock(move || { this.unbind_internal(); Ok(()) }))
     }
 
     #[inline]

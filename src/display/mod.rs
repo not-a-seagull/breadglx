@@ -418,6 +418,11 @@ where
             .display_mut()
             .query_glx_version_immediate_async(1, 1)
             .await?;
+        if major_version != 1 || minor_version < 1 {
+            return Err(breadx::BreadError::StaticMsg(
+                "breadglx is not compatible with GLX v1.0",
+            ));
+        }
 
         let mut context: Option<dispatch::DisplayDispatch<Dpy>> = None;
 

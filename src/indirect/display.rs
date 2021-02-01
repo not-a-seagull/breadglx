@@ -31,17 +31,23 @@ impl<Dpy> fmt::Debug for IndirectDisplay<Dpy> {
 impl<Dpy: DisplayLike> IndirectDisplay<Dpy> {
     #[inline]
     pub fn new(_dpy: &mut Display<Dpy::Connection>) -> breadx::Result<Self> {
-        Ok(Self {
+        /*Ok(Self {
             _private: PhantomData,
-        })
+        })*/
+        Err(breadx::BreadError::StaticMsg(
+            "Indirect displays are currently unavailable",
+        ))
     }
 
     #[cfg(feature = "async")]
     #[inline]
     pub async fn new_async(_dpy: &mut Display<Dpy::Connection>) -> breadx::Result<Self> {
-        Ok(Self {
+        /*Ok(Self {
             _private: PhantomData,
-        })
+        })*/
+        Err(breadx::BreadError::StaticMsg(
+            "Indirect displays are currently unavailable",
+        ))
     }
 }
 
@@ -76,8 +82,8 @@ where
     #[inline]
     fn create_screen_async<'future, 'a, 'b>(
         &'a self,
-        _dpy: &'b mut Display<Dpy::Connection>,
-        _index: usize,
+        dpy: &'b mut Display<Dpy::Connection>,
+        index: usize,
     ) -> GenericFuture<'future, breadx::Result<GlScreen<Dpy>>>
     where
         'a: 'future,

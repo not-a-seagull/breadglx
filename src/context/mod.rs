@@ -21,21 +21,18 @@ use std::{
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
 #[cfg(feature = "async")]
+use async_lock::RwLockReadGuard;
+#[cfg(feature = "async")]
 use breadx::display::AsyncConnection;
 #[cfg(feature = "async")]
 use core::future::Future;
+#[cfg(feature = "async")]
+use futures_lite::future;
 
 mod attrib;
 pub use attrib::*;
 pub(crate) mod dispatch;
 pub(crate) use dispatch::ContextDispatch;
-
-#[cfg(feature = "async")]
-use async_lock::RwLockReadGuard;
-#[cfg(feature = "async")]
-use breadx::display::AsyncConnection;
-#[cfg(feature = "async")]
-use futures_lite::future;
 
 #[cfg(not(feature = "async"))]
 use once_cell::sync::OnceCell;
@@ -161,6 +158,11 @@ impl<Dpy> GlContext<Dpy> {
     #[inline]
     pub(crate) fn get() -> RwLockReadGuard<'static, Option<AnyArc>> {
         get_current_context()
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) fn get_async() -> impl Future<Output = RwLockReadGuard<'static, Option<AnyArc>>> {
+        get_current_context_async()
     }
 }
 

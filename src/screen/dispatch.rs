@@ -12,7 +12,7 @@ use breadx::{display::Connection, Drawable};
 use std::sync::Arc;
 
 #[cfg(feature = "async")]
-use crate::util::GenericFuture;
+use crate::{screen::AsyncGlInternalScreen,util::GenericFuture};
 #[cfg(feature = "async")]
 use breadx::display::AsyncConnection;
 

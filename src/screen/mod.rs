@@ -19,6 +19,8 @@ use std::{convert::TryInto, sync::Arc};
 
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
+#[cfg(feature = "async")]
+use breadx::display::AsyncConnection;
 
 mod dispatch;
 
@@ -155,7 +157,9 @@ impl<Dpy> GlScreen<Dpy> {
     where
         'a: 'b,
     {
-        self.fbconfigs.iter().filter(move |fb| fb.fulfills_rules(rules))
+        self.fbconfigs
+            .iter()
+            .filter(move |fb| fb.fulfills_rules(rules))
     }
 }
 

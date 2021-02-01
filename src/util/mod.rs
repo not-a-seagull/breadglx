@@ -6,7 +6,9 @@ use std::{
 };
 
 #[cfg(feature = "async")]
-use std::{future::Future, pin::Pin};
+use crate::offload;
+#[cfg(feature = "async")]
+use std::{future::Future, pin::Pin, marker::PhantomData};
 
 /*#[cfg(feature = "dri")]
 mod fence;
@@ -53,7 +55,7 @@ impl<F: FnOnce()> Drop for CallOnDrop<F> {
 pub(crate) struct OffloadOnDrop<Fut, F = fn() -> Fut>(Option<F>, PhantomData<Fut>);
 
 #[cfg(feature = "async")]
-impl<Fut, F> OffloadOnDrop<F> {
+impl<Fut, F> OffloadOnDrop<Fut, F> {
     #[inline]
     pub fn new(f: F) -> Self {
         Self(Some(f), PhantomData)
@@ -69,7 +71,7 @@ impl<Fut: Future<Output = ()> + Send, F: FnOnce() -> Fut> Drop for OffloadOnDrop
 }
 
 /// Mark an object that usually isn't thread safe as thread safe.
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub(crate) struct ThreadSafe<T: ?Sized>(T);
 

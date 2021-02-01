@@ -1,5 +1,6 @@
 // MIT/Apache2 License
 
+#![allow(warnings)]
 #![feature(const_fn)] // need this for creating PCI tables for DRI
 #![feature(new_uninit)] // for DRI3 we need to initialize buffers without putting stuff in them
 #![feature(raw_ref_macros)]
