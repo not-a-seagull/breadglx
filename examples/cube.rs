@@ -9,6 +9,7 @@ use gl::types::*;
 use log::LevelFilter;
 use nalgebra::{Matrix4, Point3, Vector3};
 use std::{
+    convert::TryInto,
     ffi::CString,
     mem::{self, MaybeUninit},
     os::raw::c_int,
@@ -138,11 +139,12 @@ fn main() -> Result {
     let projection =
         Matrix4::<GLfloat>::new_perspective(width as f32 / height as f32, radians(45.0), 0.1, 100.0);
     let mut camera_posn = Point3::new(10.0, 6.0, 6.0);
-    let mut view = Matrix4::<GLfloat>::look_at_rh(
-        &camera_posn,
+    let mut view = Matrix4::<GLfloat>::face_towards(
         &Point3::new(0.0, 0.0, 0.0),
+        &camera_posn,
         &Vector3::new(0.0, 1.0, 0.0),
     );
+    let rotation = Matrix4::<GLfloat>::new_rotation(Vector3::new(0.0, 0.0, radians(5.0)));
     let model = Matrix4::<GLfloat>::identity();
 
     // make sure OpenGL knows about this matrix
@@ -168,8 +170,9 @@ fn main() -> Result {
             }
             Event::ButtonPress(_) => {
                 do_render = true;
-                back_color = [fastrand::f32(), fastrand::f32(), fastrand::f32()];
-                cube_color = [fastrand::f32(), fastrand::f32(), fastrand::f32()];
+//                back_color = [fastrand::f32(), fastrand::f32(), fastrand::f32()];
+//                cube_color = [fastrand::f32(), fastrand::f32(), fastrand::f32()];
+                view *= rotation.clone();
             }
             Event::ClientMessage(cme) => {
                 if cme.data.longs()[0] == wdw.xid {
@@ -228,7 +231,8 @@ fn render(
         gl::EnableVertexAttribArray(0);
         gl::BindBuffer(gl::ARRAY_BUFFER, buffer);
         gl::VertexAttribPointer(0, 3, gl::FLOAT, gl::FALSE, 0, ptr::null_mut());
-        gl::DrawArrays(gl::TRIANGLES, 0, CUBE_VERTEX_DATA.len() as _);
+        let cvdlen: GLsizei = CUBE_VERTEX_DATA.len().try_into().unwrap();
+        gl::DrawArrays(gl::TRIANGLES, 0, cvdlen / 3);
         gl::DisableVertexAttribArray(0);
     }
 }
@@ -319,7 +323,7 @@ fn radians(deg: f32) -> f32 {
     deg * (std::f32::consts::PI / 180.0)
 }
 
-const CUBE_VERTEX_DATA: &[f32] = &[
+const CUBE_VERTEX_DATA: &[GLfloat] = &[
     -1.0, -1.0, -1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 1.0,
     -1.0, 1.0, -1.0, 1.0, -1.0, -1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0, -1.0, -1.0,
     -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, -1.0, 1.0,
@@ -327,6 +331,45 @@ const CUBE_VERTEX_DATA: &[f32] = &[
     -1.0, 1.0, 1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
     -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, 1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -1.0,
     1.0, 1.0, 1.0, -1.0, 1.0,
+];
+
+const CUBE_COLOR_DATA: &[GLfloat] = &[
+    0.583,  0.771,  0.014,
+    0.609,  0.115,  0.436,
+    0.327,  0.483,  0.844,
+    0.822,  0.569,  0.201,
+    0.435,  0.602,  0.223,
+    0.310,  0.747,  0.185,
+    0.597,  0.770,  0.761,
+    0.559,  0.436,  0.730,
+    0.359,  0.583,  0.152,
+    0.483,  0.596,  0.789,
+    0.559,  0.861,  0.639,
+    0.195,  0.548,  0.859,
+    0.014,  0.184,  0.576,
+    0.771,  0.328,  0.970,
+    0.406,  0.615,  0.116,
+    0.676,  0.977,  0.133,
+    0.971,  0.572,  0.833,
+    0.140,  0.616,  0.489,
+    0.997,  0.513,  0.064,
+    0.945,  0.719,  0.592,
+    0.543,  0.021,  0.978,
+    0.279,  0.317,  0.505,
+    0.167,  0.620,  0.077,
+    0.347,  0.857,  0.137,
+    0.055,  0.953,  0.042,
+    0.714,  0.505,  0.345,
+    0.783,  0.290,  0.734,
+    0.722,  0.645,  0.174,
+    0.302,  0.455,  0.848,
+    0.225,  0.587,  0.040,
+    0.517,  0.713,  0.338,
+    0.053,  0.959,  0.120,
+    0.393,  0.621,  0.362,
+    0.673,  0.211,  0.457,
+    0.820,  0.883,  0.371,
+    0.982,  0.099,  0.879
 ];
 
 //const CUBE_VERTEX_DATA: &[f32] = &[-1.0, -1.0, 0.0, 1.0, -1.0, 0.0, 0.0, 1.0, 0.0];

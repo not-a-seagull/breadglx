@@ -77,7 +77,7 @@ where
 #[cfg(feature = "async")]
 impl<Dpy: DisplayLike> AsyncGlInternalDisplay<Dpy> for IndirectDisplay<Dpy>
 where
-    Dpy::Connection: AsyncConnection,
+    Dpy::Connection: AsyncConnection + Send,
 {
     #[inline]
     fn create_screen_async<'future, 'a, 'b>(

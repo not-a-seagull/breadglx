@@ -43,12 +43,9 @@ static OFFLOADER: Lazy<Executor<'static>> = Lazy::new(|| {
     // hot futures in FFI calls
     const THREAD_COUNT: usize = 2;
 
-    // avoid an allocation, why not?
-    const OFFLOADER_THREAD_NAMES: &[&'static str] = &["breadglx-offload-1", "breadglx-offload-2"];
-
     for i in 0..THREAD_COUNT {
         thread::Builder::new()
-            .name(OFFLOADER_THREAD_NAMES[i])
+            .name(format!("breadglx-offloader-{}", i))
             .spawn(|| loop {
                 panic::catch_unwind(|| future::block_on(OFFLOADER.run(future::pending::<()>())))
                     .ok();

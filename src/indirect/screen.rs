@@ -89,14 +89,19 @@ where
     }
 
     #[inline]
-    fn swap_buffers_async<'future>(
-        &'future self,
+    fn swap_buffers_async<'future, 'a, 'b>(
+        &'a self,
+        display: &'b GlDisplay<Dpy>,
         drawable: Drawable,
         target_msc: i64,
         divisor: i64,
         remainder: i64,
         flush: bool,
-    ) -> GenericFuture<'future, breadx::Result> {
+    ) -> GenericFuture<'future, breadx::Result>
+    where
+        'a: 'future,
+        'b: 'future,
+    {
         Box::pin(async { unimplemented!() })
     }
 }

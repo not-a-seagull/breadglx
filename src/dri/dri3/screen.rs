@@ -29,7 +29,7 @@ use std::{
 };
 
 #[cfg(feature = "async")]
-use crate::{screen::AsyncGlInternalScreen, util::GenericFuture};
+use crate::{offload, screen::AsyncGlInternalScreen, util::GenericFuture};
 #[cfg(feature = "async")]
 use breadx::display::AsyncConnection;
 
@@ -414,7 +414,10 @@ where
 }
 
 #[cfg(feature = "async")]
-impl<Dpy: DisplayLike> Dri3Screen<Dpy> where Dpy::Connection: AsyncConnection + Send {
+impl<Dpy: DisplayLike> Dri3Screen<Dpy>
+where
+    Dpy::Connection: AsyncConnection + Send,
+{
     #[inline]
     pub async fn new_async(
         dpy: &mut Display<Dpy::Connection>,
@@ -453,7 +456,7 @@ impl<Dpy: DisplayLike> Dri3Screen<Dpy> where Dpy::Connection: AsyncConnection + 
             interop: ptr::null(),
             driver_configs: ptr::null_mut(),
             dri_configmap: None,
-            drawable_map: DashMap::new(),
+            drawable_map: ManuallyDrop::new(DashMap::new()),
             fbconfigs: fbconfigs.clone(),
             visuals: visuals.clone(),
             dropper: Dropper::<Dpy>::async_dropper,
@@ -464,7 +467,7 @@ impl<Dpy: DisplayLike> Dri3Screen<Dpy> where Dpy::Connection: AsyncConnection + 
             let exts = unsafe { &mut *(extensions.as_mut_slice() as *mut [ExtensionContainer]) };
 
             let thisref = Arc::get_mut(&mut this).expect("Infallible Arc::get_mut()");
-            thisref.create_dri_screen(scr, fd, exts)?;
+            thisref.create_dri_screen(scr, fd, super::loader_extensions_async::<Dpy>(), exts)?;
 
             // now we can load up the extension
             thisref.get_extensions()?;
@@ -518,8 +521,28 @@ impl<Dpy: DisplayLike> Dri3Screen<Dpy> where Dpy::Connection: AsyncConnection + 
                         })
                         .ok_or(breadx::BreadError::StaticMsg("Failed to find FbConfig ID"))?,
                 };
-                let d =
-                    Dri3Drawable::new_async(&dpy, drawable, self.clone(), fbconfig.clone()).await?;
+
+                let has_multiplane = match (unsafe { self.inner.image.as_ref() }, dpy.dispatch()) {
+                    (Some(image), DisplayDispatch::Dri3(d3)) => {
+                        image.base.version >= 15
+                            && (d3.dri3_version_major() > 1
+                                || (d3.dri3_version_major() == 1 && d3.dri3_version_minor() >= 2))
+                            && (d3.present_version_major() > 1
+                                || (d3.present_version_major() == 1
+                                    && d3.present_version_minor() >= 2))
+                    }
+                    _ => false,
+                };
+
+                let d = Dri3Drawable::new_async(
+                    &dpy,
+                    drawable,
+                    self.clone(),
+                    context.clone(),
+                    fbconfig.clone(),
+                    has_multiplane,
+                )
+                .await?;
                 self.inner.drawable_map.insert(drawable, d.clone());
                 Ok(d)
             }
@@ -660,16 +683,18 @@ where
         let screen_fd = screen.fd;
         let driver_configs = unsafe { ThreadSafe::new(screen.driver_configs) };
         let dri_screen = unsafe { ThreadSafe::new(screen.dri_screen.unwrap().as_ptr()) };
-        let destroy_screen = unsafe { ThreadSafe::new((*screen.core).destroyScreen.take()) };
+        let destroy_screen =
+            unsafe { ThreadSafe::new((*screen.core).destroyScreen.as_ref().cloned()) };
 
-        blocking::unblock(move || {
+        offload::offload(blocking::unblock(move || {
             if let Some(destroy_screen) = destroy_screen.into_inner() {
                 unsafe { (destroy_screen)(dri_screen.into_inner()) };
-                unsafe { iter_configs(*driver_configs, |ext| libc::free(ext as *mut _)) };
-                unsafe { libc::free(*driver_configs as *mut _) };
-                unsafe { libc::close(screen_fd) };
             }
-        });
+
+            unsafe { iter_configs(*driver_configs, |ext| libc::free(ext as *mut _)) };
+            unsafe { libc::free(*driver_configs as *mut _) };
+            unsafe { libc::close(screen_fd) };
+        }));
     }
 }
 

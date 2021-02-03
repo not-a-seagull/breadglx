@@ -80,7 +80,7 @@ use async_lock::MutexGuard;
 #[cfg(feature = "async")]
 use breadx::display::AsyncConnection;
 #[cfg(feature = "async")]
-use futures_lite::{prelude::*, future};
+use futures_lite::{future, prelude::*};
 
 #[cfg(not(feature = "async"))]
 use once_cell::sync::Lazy;
@@ -319,11 +319,12 @@ impl BlitContext {
 
 #[inline]
 fn get_blit_context_internal<Dpy>(
-    draw: &Dri3Drawable<Dpy>,
+    screen: Dri3Screen<Dpy>,
     lock: &mut Option<BlitContext>,
 ) -> CtxPtr {
+    let core = screen.inner.core;
     if let Some(bc) = lock {
-        if bc.screen != draw.screen().dri_screen() {
+        if bc.screen != screen.dri_screen() {
             let bc = lock.take();
             bc.unwrap().free();
         }
@@ -332,8 +333,7 @@ fn get_blit_context_internal<Dpy>(
     let ctx = if let Some(bc) = lock {
         bc.context
     } else {
-        let scr = draw.screen();
-        let core = scr.inner.core;
+        let scr = screen;
         let ctx = unsafe {
             ((&*core).createNewContext.unwrap())(
                 scr.dri_screen().as_ptr(),
@@ -371,22 +371,22 @@ fn get_blit_context<Dpy>(
     let mut blit_context = future::block_on(BLIT_CONTEXT.lock());
 
     (
-        get_blit_context_internal(draw, &mut *blit_context),
+        get_blit_context_internal(draw.screen(), &mut *blit_context),
         blit_context,
     )
 }
 
 #[cfg(feature = "async")]
 #[inline]
-async fn get_blit_context_async<Dpy>(
-    draw: Arc<Dri3Drawable<Dpy>>,
+async fn get_blit_context_async<Dpy: DisplayLike>(
+    draw: &Dri3Drawable<Dpy>,
 ) -> (CtxPtr, MutexGuard<'static, Option<BlitContext>>) {
     let mut blit_context = BLIT_CONTEXT.lock().await;
-    let draw = draw.clone();
+    let screen = draw.screen();
 
     blocking::unblock(move || {
         (
-            get_blit_context_internal(&draw, &mut *blit_context),
+            get_blit_context_internal(screen, &mut *blit_context),
             blit_context,
         )
     })
@@ -648,7 +648,9 @@ impl<Dpy> Dri3Drawable<Dpy> {
     async fn event_wait_async(&self, guard: StateGuard<'_>) -> StateGuard<'_> {
         mem::drop(guard);
         self.event_waiter.listen().await;
-        self.state.lock().await
+        StateGuard {
+            inner: Some(self.state.lock().await),
+        }
     }
 
     #[inline]
@@ -1782,6 +1784,7 @@ where
         screen: Dri3Screen<Dpy>,
         context: Dri3Context<Dpy>,
         config: GlConfig,
+        multiplanes_available: bool,
     ) -> breadx::Result<Arc<Self>> {
         // we can double up here to hopefully save some time
         let ((adaptive_sync, vblank_mode, screen), geometry) = future::zip(
@@ -1790,13 +1793,15 @@ where
                 (adaptive_sync, vblank_mode, screen)
             }),
             async {
-                dpy.display_async().await.get_geometry_immediate_async(
-                    drawable,
-                )
-                .await
+                dpy.display_async()
+                    .await
+                    .get_drawable_geometry_immediate_async(drawable)
+                    .await
             },
         )
         .await;
+        let geometry = geometry?;
+
         let swap_interval = match vblank_mode {
             0 | 1 => 0,
             _ => 1,
@@ -1812,24 +1817,26 @@ where
         };
 
         let screen2 = screen.clone();
+        let config2 = config.clone();
         let swap_method = blocking::unblock(move || {
             let mut swap_method = ffi::__DRI_ATTRIB_SWAP_UNDEFINED;
             if unsafe { (&*screen2.inner.core) }.base.version >= 2 {
                 unsafe {
                     ((&*screen2.inner.core).getConfigAttrib.unwrap())(
-                        screen2.driconfig_from_fbconfig(&config).unwrap().as_ptr(),
+                        screen2.driconfig_from_fbconfig(&config2).unwrap().as_ptr(),
                         ffi::__DRI_ATTRIB_SWAP_METHOD,
                         &mut swap_method,
                     )
                 };
             }
             swap_method
-        });
+        })
+        .await;
 
         let mut this = Arc::new(Self {
             drawable: NonNull::dangling(),
             x_drawable: drawable,
-            config,
+            config: config.clone(),
             is_different_gpu: screen.inner.is_different_gpu,
             screen: screen.weak_ref(),
             context,
@@ -1851,16 +1858,14 @@ where
             state: async_lock::Mutex::new(Default::default()),
             has_event_waiter: AtomicBool::new(false),
             event_waiter: event_listener::Event::new(),
+            multiplanes_available,
         });
 
         let this1 = this.clone();
         let (res, dri_drawable) = future::zip(as_future, async move {
             blocking::unblock(move || {
-                let dri_drawable = create_the_drawable(
-                    &this1.screen,
-                    &this1.config,
-                    Arc::as_ptr(&this1) as *const _,
-                );
+                let dri_drawable =
+                    create_the_drawable(&screen, &this1.config, Arc::as_ptr(&this1) as *const _);
                 dri_drawable
             })
             .await
@@ -2065,7 +2070,7 @@ where
 
         // get the context we need to do the blitting
         let (dri_context, _guard) = if self.context.is_current_async().await {
-            (self.context.dri_context(), None)
+            (unsafe { ThreadSafe::new(self.context.dri_context()) }, None)
         } else {
             flush_flag |= ffi::__BLIT_FLAG_FLUSH as c_int;
             let (dri_context, guard) = get_blit_context_async(self).await;
@@ -2073,14 +2078,14 @@ where
                 Some(dc) => dc,
                 None => return Err(StaticMsg("Unable to creat blitting context")),
             };
-            (dri_context, Some(guard))
+            (unsafe { ThreadSafe::new(dri_context) }, Some(guard))
         };
 
         let dri_context = unsafe { ThreadSafe::new(dri_context) };
         let screen = self.screen();
 
         blocking::unblock(move || unsafe {
-            ((screen.inner.image)
+            ((*screen.inner.image)
                 .blitImage
                 .expect("BlitImage not present"))(
                 dri_context.into_inner().as_ptr(),
@@ -2129,7 +2134,7 @@ where
                     self.depth.load(Ordering::Relaxed),
                 )
                 .await?;
-                let mut state = self.state_async().await?;
+                let mut state = self.state_async().await;
                 state.buffers[id] = Some(buffer.clone());
                 buffer
             }
@@ -2186,7 +2191,7 @@ where
 
         for id in first_id..first_id + n_ids {
             if let Some(buffer) = state.buffers[id].take() {
-                free_buffer_arc_async(buffer, self.display.clone(), self.screen.clone()).await?;
+                free_buffer_arc_async(buffer, self.display.clone(), self.screen()).await?;
             }
         }
 
@@ -2201,7 +2206,7 @@ where
                 free_buffer_arc_async(
                     state.buffers[id].take().unwrap(),
                     self.display.clone(),
-                    self.screen.clone(),
+                    self.screen(),
                 )
                 .await?;
             }
@@ -2239,7 +2244,8 @@ where
                     0,
                     0,
                     width.into(),
-                    height.into().0,
+                    height.into(),
+                    0,
                     0,
                     ffi::__BLIT_FLAG_FLUSH as _,
                 )
@@ -2393,34 +2399,50 @@ where
         let mut state: Option<StateGuard<'a>> = None;
         let mut fence_await = false;
 
-        let mut create_new_buffer = move |state: &mut Option<StateGuard<'a>>| -> Pin<
-            Box<dyn Future<Output = breadx::Result<Arc<Dri3Buffer>>>>,
-        > {
+        #[inline]
+        fn create_new_buffer<'future, 'a, 'b, 'c, Dpy: DisplayLike>(
+            state: &'a mut Option<StateGuard<'b>>,
+            format: c_uint,
+            width: u16,
+            height: u16,
+            this: &'b Dri3Drawable<Dpy>,
+            buffer_type: BufferType,
+            fence_await: &'c mut bool,
+            buf_id: usize,
+        ) -> Pin<Box<dyn Future<Output = breadx::Result<Arc<Dri3Buffer>>> + Send + 'future>>
+        where
+            'a: 'future,
+            'b: 'future,
+            'c: 'future,
+            Dpy::Connection: AsyncConnection + Send,
+        {
             Box::pin(async move {
                 let mut new_buffer = Dri3Buffer::new_async(
-                    self,
+                    this,
                     format,
                     width,
                     height,
-                    self.depth.load(Ordering::SeqCst),
+                    this.depth.load(Ordering::SeqCst),
                 )
                 .await?;
 
-                let mut conn = self.display.display_async().await;
+                let mut conn = this.display.display_async().await;
                 if state.is_none() {
-                    *state = Some(self.state_async().await);
+                    *state = Some(this.state_async().await);
                 }
 
                 let buffer = state.as_mut().unwrap().buffers[buf_id].take();
                 if buffer.is_some()
                     && (!matches!(buffer_type, BufferType::Front)
-                        || self.has_fake_front.load(Ordering::Acquire))
+                        || this.has_fake_front.load(Ordering::Acquire))
                 {
                     let buffer = buffer.unwrap();
-                    if self
+                    let nbi = ImgPtr(new_buffer.image);
+                    let bi = ImgPtr(buffer.image);
+                    if this
                         .blit_images_async(
-                            ImgPtr(new_buffer.image),
-                            ImgPtr(buffer.image),
+                            nbi,
+                            bi,
                             0,
                             0,
                             cmp::min(buffer.width.into(), new_buffer.width.into()),
@@ -2433,8 +2455,9 @@ where
                         .is_err()
                         && buffer.linear_buffer.is_none()
                     {
-                        reset_fence_async(new_buffer.shm_fence).await;
-                        let gc = self.drawable_gc_async(&mut *conn).await?;
+                        let s = unsafe { ThreadSafe::new(new_buffer.shm_fence) };
+                        reset_fence_async(s).await;
+                        let gc = this.drawable_gc_async(&mut *conn).await?;
                         conn.copy_area_async(
                             buffer.pixmap,
                             new_buffer.pixmap,
@@ -2448,20 +2471,21 @@ where
                         )
                         .await?;
                         trigger_fence_async::<Dpy>(&mut conn, new_buffer.sync_fence).await?;
-                        fence_await = true;
+                        *fence_await = true;
                     }
 
                     mem::drop(conn);
-                    free_buffer_arc_async(buffer, self).await?;
+                    free_buffer_arc_async(buffer, this.display.clone(), this.screen()).await?;
                 } else if matches!(buffer_type, BufferType::Front) {
                     // fill the new fake front with data from the real front
                     mem::drop((conn, state.take()));
-                    self.swapbuffer_barrier_async().await?;
-                    let mut conn = self.display.display_async().await;
-                    reset_fence_async(new_buffer.shm_fence).await;
-                    let gc = self.drawable_gc_async(&mut *conn).await?;
+                    this.swapbuffer_barrier_async().await?;
+                    let mut conn = this.display.display_async().await;
+                    let s = unsafe { ThreadSafe::new(new_buffer.shm_fence) };
+                    reset_fence_async(s).await;
+                    let gc = this.drawable_gc_async(&mut *conn).await?;
                     conn.copy_area_async(
-                        self.x_drawable,
+                        this.x_drawable,
                         new_buffer.pixmap,
                         gc,
                         0,
@@ -2474,11 +2498,14 @@ where
                     .await?;
                     trigger_fence_async::<Dpy>(&mut conn, new_buffer.sync_fence).await?;
 
-                    if let Some(linear_buffer) = new_buffer.linear_buffer {
-                        await_on_fence(&mut *conn, Some(self), &new_buffer).await?;
-                        self.blit_images_async(
-                            ImgPtr(new_buffer.image),
-                            ImgPtr(linear_buffer),
+                    let lb = unsafe { ThreadSafe::new(new_buffer.linear_buffer) }.into_option();
+                    if let Some(linear_buffer) = lb {
+                        await_on_fence(&mut *conn, Some(this), &new_buffer).await?;
+                        let nbi = ImgPtr(new_buffer.image);
+                        let lbi = ImgPtr(*linear_buffer);
+                        this.blit_images_async(
+                            nbi,
+                            lbi,
                             0,
                             0,
                             width.into(),
@@ -2489,29 +2516,49 @@ where
                         )
                         .await?;
                     } else {
-                        fence_await = true;
+                        *fence_await = true;
                     }
                 }
 
                 if state.is_none() {
-                    *state = Some(self.state_async().await);
+                    *state = Some(this.state_async().await);
                 }
                 state.as_mut().unwrap().buffers[buf_id] = Some(new_buffer.clone());
-                Ok(new_buffer)
+                breadx::Result::Ok(new_buffer)
             })
-        };
+        }
 
         let mut temp_state = self.state_async().await;
         let buffer = match temp_state.buffers[buf_id] {
             None => {
                 mem::drop(temp_state);
-                create_new_buffer(&mut state).await?
+                create_new_buffer(
+                    &mut state,
+                    format,
+                    width,
+                    height,
+                    self,
+                    buffer_type,
+                    &mut fence_await,
+                    buf_id,
+                )
+                .await?
             }
             Some(ref buffer)
                 if buffer.reallocate || buffer.width != width || buffer.height != height =>
             {
                 mem::drop(temp_state);
-                create_new_buffer(&mut state).await?
+                create_new_buffer(
+                    &mut state,
+                    format,
+                    width,
+                    height,
+                    self,
+                    buffer_type,
+                    &mut fence_await,
+                    buf_id,
+                )
+                .await?
             }
             Some(ref buffer) => {
                 let res = buffer.clone();
@@ -2545,23 +2592,16 @@ where
                     .unwrap(),
             )
         {
-            self.blit_images_async(
-                ImgPtr(buffer.image),
-                ImgPtr(
-                    state.buffers[state.cur_blit_source as usize]
-                        .as_ref()
-                        .unwrap()
-                        .image,
-                ),
-                0,
-                0,
-                width.into(),
-                height.into(),
-                0,
-                0,
-                0,
-            )
-            .await?;
+            let bi = ImgPtr(buffer.image);
+            let si = ImgPtr(
+                state.buffers[state.cur_blit_source as usize]
+                    .as_ref()
+                    .unwrap()
+                    .image,
+            );
+
+            self.blit_images_async(bi, si, 0, 0, width.into(), height.into(), 0, 0, 0)
+                .await?;
 
             buffer.last_swap.store(
                 state.buffers[state.cur_blit_source as usize]
@@ -2607,9 +2647,10 @@ where
         }
 
         let shm_fence =
-            blocking::unblock(move || unsafe { (map_shm.into_inner())(fence_fd) }).await;
-        let shm_fence = match NonNull::new(shm_fence) {
-            Some(shm_fence) => shm_fence,
+            blocking::unblock(move || unsafe { ThreadSafe::new((map_shm.into_inner())(fence_fd)) })
+                .await;
+        let shm_fence = match NonNull::new(shm_fence.into_inner()) {
+            Some(shm_fence) => unsafe { ThreadSafe::new(shm_fence) },
             None => {
                 unsafe { libc::close(fence_fd) };
                 return Err(StaticMsg("Failed to map SHM fence"));
@@ -2617,11 +2658,14 @@ where
         };
 
         let mut conn = self.display.display_async().await;
-        let sync_fence = match conn.fence_from_fd_async(self.x_drawable, false, fence_fd) {
+        let sync_fence = match conn
+            .fence_from_fd_async(self.x_drawable, false, fence_fd)
+            .await
+        {
             Ok(sf) => sf,
             Err(e) => {
                 blocking::unblock(move || unsafe {
-                    (unmap_shm)(shm_fence.as_ptr());
+                    (unmap_shm)(shm_fence.into_inner().as_ptr());
                     libc::close(fence_fd);
                 })
                 .await;
@@ -2629,10 +2673,8 @@ where
             }
         };
 
-        let shm_fence = unsafe { ThreadSafe::new(shm_fence) };
-
-        let fence_guard = CallOnDrop::new(|| {
-            offload::offload(async {
+        let fence_guard = CallOnDrop::new(move || {
+            offload::offload(async move {
                 blocking::unblock(move || {
                     unsafe { (unmap_shm)(shm_fence.into_inner().as_ptr()) };
                     unsafe { libc::close(fence_fd) };
@@ -2641,18 +2683,23 @@ where
             });
         });
 
-        let screen = if let Some(ref ctx) = GlContext::<Dpy>::get_async()
-            .await
-            .as_ref()
-            .and_then(|m| promote_anyarc_ref::<Dpy>(m))
-        {
-            if let ContextDispatch::Dri3(d3) = ctx.dispatch() {
-                d3.screen().dri_screen()
-            } else {
-                this_screen.dri_screen()
-            }
-        } else {
-            this_screen.dri_screen()
+        let screen = unsafe {
+            ThreadSafe::new(
+                if let Some(ref ctx) = GlContext::<Dpy>::get_async()
+                    .await
+                    .as_ref()
+                    .and_then(|m| promote_anyarc_ref::<Dpy>(m))
+                {
+                    if let ContextDispatch::Dri3(d3) = ctx.dispatch() {
+                        d3.screen().dri_screen()
+                    } else {
+                        this_screen.dri_screen()
+                    }
+                } else {
+                    this_screen.dri_screen()
+                }
+                .as_ptr(),
+            )
         };
         let pixmap = Pixmap::const_from_xid(self.x_drawable.xid);
 
@@ -2665,27 +2712,17 @@ where
             let bfp = conn.buffers_from_pixmap_immediate_async(pixmap).await?;
             let width = bfp.width;
             let height = bfp.height;
-            let image = image_from_buffers_async(
-                &self.screen(),
-                format,
-                bfp,
-                unsafe { ThreadSafe::new(screen.as_ptr()) },
-                unsafe { ThreadSafe::new(buffer.as_ptr() as *const ()) },
-            )
-            .await?;
+            let buffer_ptr = unsafe { ThreadSafe::new(buffer.as_ptr() as *const ()) };
+            let image =
+                image_from_buffers_async(&this_screen, format, bfp, screen, buffer_ptr).await?;
             (image.into_inner(), width, height)
         } else {
             let bfp = conn.buffer_from_pixmap_immediate_async(pixmap).await?;
             let width = bfp.width;
             let height = bfp.height;
-            let image = image_from_buffer_async(
-                &self.screen(),
-                format,
-                bfp,
-                unsafe { ThreadSafe::new(screen.as_ptr()) },
-                unsafe { ThreadSafe::new(buffer.as_ptr() as *const ()) },
-            )
-            .await?;
+            let buffer_ptr = unsafe { ThreadSafe::new(buffer.as_ptr() as *const ()) };
+            let image =
+                image_from_buffer_async(&this_screen, format, bfp, screen, buffer_ptr).await?;
             (image.into_inner(), width, height)
         };
 
@@ -2698,7 +2735,7 @@ where
                     image,
                     linear_buffer: None,
                     sync_fence,
-                    shm_fence,
+                    shm_fence: shm_fence.into_inner(),
                     pixmap,
                     own_pixmap: false,
                     busy: AtomicI32::new(0),
@@ -2804,11 +2841,15 @@ where
     }
 
     #[inline]
-    pub async fn has_supported_modifier_async(&self, format: c_uint, modifiers: &[u64]) -> bool {
+    pub async fn has_supported_modifier_async(
+        &self,
+        format: c_uint,
+        modifiers: Vec<u64>,
+    ) -> (bool, Vec<u64>) {
         let scr = self.screen();
         let query_dma_bufs = match unsafe { &*scr.inner.image }.queryDmaBufModifiers {
             Some(qdb) => unsafe { ThreadSafe::new(qdb) },
-            None => return false,
+            None => return (false, modifiers),
         };
 
         blocking::unblock(move || {
@@ -2824,12 +2865,12 @@ where
                 )
             } == 0
             {
-                return false;
+                return (false, modifiers);
             }
 
             let mut mod_count = unsafe { MaybeUninit::assume_init(mod_count) };
             if mod_count == 0 {
-                return false;
+                return (false, modifiers);
             }
 
             let mut mods = Box::<[u64]>::new_uninit_slice(mod_count as usize);
@@ -2846,10 +2887,13 @@ where
 
             let mods = unsafe { mods.assume_init() };
 
-            mods.into_iter()
-                .flat_map(|i| modifiers.iter().map(move |j| (i, j)))
-                .find(|(i, j)| i == j)
-                .is_some()
+            (
+                mods.into_iter()
+                    .flat_map(|i| modifiers.iter().map(move |j| (i, j)))
+                    .find(|(i, j)| i == j)
+                    .is_some(),
+                modifiers,
+            )
         })
         .await
     }
@@ -3229,7 +3273,7 @@ impl Dri3Buffer {
         Dpy::Connection: AsyncConnection + Send,
     {
         // TODO: same as above, try to break it down into smaller parts if we can
-        let xshmfence = xshmfence_async().await;
+        let xshmfence = xshmfence_async().await?;
         let alloc_shm: ThreadSafe<XshmfenceAllocShm> =
             unsafe { xshmfence.function(&XSHMFENCE_ALLOC_SHM) }
                 .expect("xshmfence_alloc_shm not present");
@@ -3267,19 +3311,21 @@ impl Dri3Buffer {
         let mut conn = drawable.display.display_async().await;
         let screen = drawable.screen();
 
-        let image_ext = match unsafe { drawable.screen().inner.image.as_ref() } {
-            Some(r) => r,
-            None => return Err(StaticMsg("No image extension!")),
-        };
+        let ie = unsafe { ThreadSafe::new(screen.inner.image) };
+        if ie.into_inner().is_null() {
+            return Err(StaticMsg("No image extension!"));
+        }
 
         let (image, linear_buffer, pixmap_buffer) = if !drawable.is_different_gpu {
-            let mut image = ptr::null_mut();
+            let mut image = None;
 
             // check to see if we can use modifiers
             if drawable.multiplanes_available
-                && image_ext.base.version >= 15
-                && image_ext.queryDmaBufModifiers.is_some()
-                && image_ext.createImageWithModifiers.is_some()
+                && unsafe {
+                    (**ie).base.version >= 15
+                        && (**ie).queryDmaBufModifiers.is_some()
+                        && (**ie).createImageWithModifiers.is_some()
+                }
             {
                 let mut x_modifiers = conn
                     .get_supported_modifiers_immediate_async(
@@ -3291,14 +3337,12 @@ impl Dri3Buffer {
                 let mut modifiers: Option<Vec<u64>> = None;
 
                 if !x_modifiers.window.is_empty() {
-                    if drawable
-                        .has_supported_modifier_async(
-                            image_format_to_fourcc(format) as _,
-                            &x_modifiers.window,
-                        )
-                        .await
-                    {
-                        modifiers = Some(mem::take(&mut x_modifiers.window));
+                    let mods: Vec<u64> = mem::take(&mut x_modifiers.window);
+                    let (res, mods) = drawable
+                        .has_supported_modifier_async(image_format_to_fourcc(format) as _, mods)
+                        .await;
+                    if res {
+                        modifiers = Some(mods);
                     }
                 }
 
@@ -3308,59 +3352,62 @@ impl Dri3Buffer {
 
                 // if we were able to get the modifiers, use them to create the image
                 if let Some(modifiers) = modifiers {
-                    let ie = unsafe { ThreadSafe::new(screen.inner.image) };
                     let screen2 = screen.clone();
                     let buffer2 = buffer.clone();
-                    image = blocking::unblock(move || unsafe {
-                        ThreadSafe::new(((*ie).createImageWithModifiers.unwrap())(
-                            screen2.dri_screen().as_ptr(),
-                            width as _,
-                            height as _,
-                            format as _,
-                            modifiers.as_ptr(),
-                            modifiers.len() as _,
-                            buffer2.as_ptr() as *const _ as *mut _,
-                        ))
-                    })
-                    .await
-                    .into_inner();
+                    image = Some(
+                        blocking::unblock(move || unsafe {
+                            ThreadSafe::new(((**ie).createImageWithModifiers.unwrap())(
+                                screen2.dri_screen().as_ptr(),
+                                width as _,
+                                height as _,
+                                format as _,
+                                modifiers.as_ptr(),
+                                modifiers.len() as _,
+                                buffer2.as_ptr() as *const _ as *mut _,
+                            ))
+                        })
+                        .await,
+                    );
                 }
             }
 
             // if the above block of code didn't create an image, create an image w/o modifiers
-            if image.is_null() {
-                let ie = unsafe { ThreadSafe::new(screen.inner.image) };
+            if image.is_none() {
                 let screen2 = screen.clone();
                 let buffer2 = buffer.clone();
-                image = blocking::unblock(move || unsafe {
-                    ThreadSafe::new(((*ie).createImage.expect("createImage not present"))(
-                        screen2.dri_screen().as_ptr(),
-                        width as _,
-                        height as _,
-                        format as _,
-                        ffi::__DRI_IMAGE_USE_SHARE
-                            | ffi::__DRI_IMAGE_USE_SCANOUT
-                            | ffi::__DRI_IMAGE_USE_BACKBUFFER,
-                        buffer2.as_ptr() as *const _ as *mut _,
-                    ))
-                })
-                .await
-                .into_inner();
+                image = Some(
+                    blocking::unblock(move || unsafe {
+                        ThreadSafe::new(((**ie).createImage.expect("createImage not present"))(
+                            screen2.dri_screen().as_ptr(),
+                            width as _,
+                            height as _,
+                            format as _,
+                            ffi::__DRI_IMAGE_USE_SHARE
+                                | ffi::__DRI_IMAGE_USE_SCANOUT
+                                | ffi::__DRI_IMAGE_USE_BACKBUFFER,
+                            buffer2.as_ptr() as *const _ as *mut _,
+                        ))
+                    })
+                    .await,
+                );
             }
 
-            let image = NonNull::new(image).ok_or(StaticMsg("createImage returned null"))?;
+            let image = match image {
+                Some(image) => unsafe {
+                    ThreadSafe::new(NonNull::new_unchecked(image.into_inner()))
+                },
+                None => return Err(StaticMsg("createImage returned null")),
+            };
 
             (image, None, image)
         } else {
             // create an image without making GPU assumptions
-            let screen2 = screen.clone();
-            let screen3 = screen.clone();
+            let screen2 = drawable.screen();
+            let screen3: Dri3Screen<Dpy> = drawable.screen();
             let buffer2 = buffer.clone();
             let buffer3 = buffer.clone();
             let image = blocking::unblock(move || unsafe {
-                ThreadSafe::new(((*screen2.into_inner())
-                    .createImage
-                    .expect("createImage not present"))(
+                ThreadSafe::new(((**ie).createImage.expect("createImage not present"))(
                     screen2.dri_screen().as_ptr(),
                     width as _,
                     height as _,
@@ -3369,37 +3416,36 @@ impl Dri3Buffer {
                     buffer2.as_ptr() as *const _ as *mut _,
                 ))
             })
-            .await
-            .into_inner();
+            .await;
 
-            let image = match NonNull::new(image) {
-                Some(image) => image,
+            let image: ThreadSafe<NonNull<ffi::__DRIimage>> = match NonNull::new(image.into_inner())
+            {
+                Some(image) => unsafe { ThreadSafe::new(image) },
                 None => return Err(StaticMsg("createImage returned null")),
             };
 
+            let linear_format = linear_format(&mut *conn, format as _);
             let linear_buffer = blocking::unblock(move || unsafe {
-                ThreadSafe::new(((*screen3.image_ext)
-                    .createImage
-                    .expect("createImage not present"))(
+                ThreadSafe::new(((**ie).createImage.expect("createImage not present"))(
                     screen3.dri_screen().as_ptr(),
                     width as _,
                     height as _,
-                    linear_format(&mut *conn, format as _) as _,
+                    linear_format as _,
                     ffi::__DRI_IMAGE_USE_SHARE
                         | ffi::__DRI_IMAGE_USE_LINEAR
                         | ffi::__DRI_IMAGE_USE_BACKBUFFER,
                     buffer3.as_ptr() as *const _ as *mut _,
                 ))
             })
-            .await
-            .into_inner();
+            .await;
 
-            let linear_buffer = match NonNull::new(linear_buffer) {
+            let linear_buffer: ThreadSafe<NonNull<ffi::__DRIimage>> = match linear_buffer
+                .into_non_null()
+            {
                 Some(linear_buffer) => linear_buffer,
                 None => {
-                    let image = unsafe { ThreadSafe::new(image) };
                     blocking::unblock(move || unsafe {
-                        ((*screen.image_ext).destroyImage.unwrap())(image.into_inner().as_ptr())
+                        ((*screen.inner.image).destroyImage.unwrap())(image.into_inner().as_ptr())
                     })
                     .await;
                     return Err(StaticMsg("createImage returned null"));
@@ -3422,8 +3468,7 @@ impl Dri3Buffer {
             }));
         });
 
-        let ie = unsafe { ThreadSafe::new(screen.inner.image) };
-        let pb = unsafe { ThreadSafe::new(pixmap_buffer) };
+        let pb = pixmap_buffer;
         let plane_num = blocking::unblock(move || {
             let mut plane_num = MaybeUninit::<c_int>::uninit();
             match unsafe {
@@ -3439,12 +3484,13 @@ impl Dri3Buffer {
         })
         .await;
 
-        let mut buffer_fds: Vec<AtomicI32> = iter::repeat(AtomicI32::new(-1)).take(4).collect();
+        let mut buffer_fds: Vec<AtomicI32> =
+            iter::repeat_with(|| AtomicI32::new(-1)).take(4).collect();
         let mut strides: [c_int; 4] = [0; 4];
         let mut offsets: [c_int; 4] = [0; 4];
 
         let buffer_guard = CallOnDrop::new(|| {
-            buffer_fds.iter().cloned().for_each(|fd| {
+            buffer_fds.iter().for_each(|fd| {
                 let fd = fd.load(Ordering::Relaxed); // OK to use relaxed since nothing else is using it anyways
                 if fd != -1 {
                     unsafe { libc::close(fd) };
@@ -3571,12 +3617,15 @@ impl Dri3Buffer {
                 Window::const_from_xid(drawable.window.load(Ordering::Acquire)),
                 width,
                 height,
-                depth,
                 strides,
                 offsets,
+                depth,
                 (cpp as u8) * 8,
                 modifier,
-                buffer_fds.iter().map(|t| t.get()).collect(),
+                buffer_fds
+                    .iter()
+                    .map(|t| t.load(Ordering::Relaxed))
+                    .collect(),
             )
             .await?
         } else {
@@ -3588,7 +3637,7 @@ impl Dri3Buffer {
                 strides[0] as _,
                 depth,
                 (cpp as u8) * 8,
-                buffer_fds[0].get(),
+                buffer_fds[0].load(Ordering::Relaxed),
             )
             .await?
         };
@@ -3605,7 +3654,7 @@ impl Dri3Buffer {
                 MaybeUninit::as_mut_ptr(Arc::get_mut(&mut buffer).unwrap()),
                 Dri3Buffer {
                     image: image.into_inner(),
-                    linear_buffer: linear_buffer.into_inner(),
+                    linear_buffer: linear_buffer.map(|lb| lb.into_inner()),
                     own_pixmap: true,
                     pixmap,
                     shm_fence: shm_fence.into_inner(),
@@ -3662,13 +3711,16 @@ impl Dri3Buffer {
         &mut self,
         conn: GlDisplay<Dpy>,
         screen: Dri3Screen<Dpy>,
-    ) -> breadx::Result {
+    ) -> breadx::Result
+    where
+        Dpy::Connection: AsyncConnection + Send,
+    {
         let mut dpy = conn.display_async().await;
         if self.own_pixmap {
-            self.pixmap.free(&mut dpy)?;
+            self.pixmap.free_async(&mut dpy).await?;
         }
 
-        dpy.free_sync_fence(self.sync_fence)?;
+        dpy.free_sync_fence_async(self.sync_fence).await?;
         let xshmfence = xshmfence_async().await?;
         let unmap_shm: ThreadSafe<XshmfenceUnmapShm> =
             unsafe { xshmfence.function(&XSHMFENCE_UNMAP_SHM) }
@@ -3679,22 +3731,24 @@ impl Dri3Buffer {
         });
 
         // destroy the buffers
-        let image_ext = ThreadSafe::new(unsafe { screen.inner.image });
-        let image = ThreadSafe::new(self.image);
-        let linear_buffer = ThreadSafe::new(self.linear_buffer.take());
+        let image_ext = unsafe { ThreadSafe::new(screen.inner.image) };
+        let image = unsafe { ThreadSafe::new(self.image) };
+        let linear_buffer = unsafe { ThreadSafe::new(self.linear_buffer.take()) };
         let t2 = blocking::unblock(move || unsafe {
             unsafe {
-                (image_ext
-                    .into_inner()
+                ((*image_ext.into_inner())
                     .destroyImage
                     .expect("destroyImage not present"))(image.as_ptr())
             };
-            if let Some(linear_buffer) = linear_buffer {
-                unsafe { (image_ext.into_inner().destroyImage.unwrap())(linear_buffer.as_ptr()) };
+            if let Some(linear_buffer) = linear_buffer.into_inner() {
+                unsafe {
+                    ((*image_ext.into_inner()).destroyImage.unwrap())(linear_buffer.as_ptr())
+                };
             }
         });
 
-        future::zip(t1, t2).await
+        future::zip(t1, t2).await;
+        Ok(())
     }
 }
 
@@ -3728,10 +3782,7 @@ fn create_the_drawable<Dpy: DisplayLike>(
     screen: &Dri3Screen<Dpy>,
     config: &GlConfig,
     drawable: *const c_void,
-) -> breadx::Result<DriDrawablePtr>
-where
-    Dpy::Connection: Connection,
-{
+) -> breadx::Result<DriDrawablePtr> {
     let config = match screen.driconfig_from_fbconfig(&config) {
         Some(config) => config.as_ptr(),
         None => {
@@ -3801,7 +3852,7 @@ fn image_from_buffer<Dpy>(
 
 #[cfg(feature = "async")]
 #[inline]
-async fn image_from_buffer_async<Dpy>(
+async fn image_from_buffer_async<Dpy: DisplayLike>(
     screen: &Dri3Screen<Dpy>,
     format: c_uint,
     mut bfp: BufferFromPixmapReply,
@@ -3869,7 +3920,7 @@ fn image_from_buffers<Dpy>(
 
 #[cfg(feature = "async")]
 #[inline]
-async fn image_from_buffers_async<Dpy>(
+async fn image_from_buffers_async<Dpy: DisplayLike>(
     screen: &Dri3Screen<Dpy>,
     format: c_uint,
     mut bfp: BuffersFromPixmapReply,
@@ -3894,7 +3945,7 @@ async fn set_fence_async(fence: ThreadSafe<NonNull<c_void>>) {
     let xshmfence = xshmfence_async().await.unwrap();
     let trigger: ThreadSafe<XshmfenceTrigger> =
         unsafe { xshmfence.function(&*XSHMFENCE_TRIGGER) }.expect("xshmfence_trigger not found");
-    blocking::unblock(move || (trigger.into_inner())(fence.into_inner().as_ptr())).await
+    blocking::unblock(move || unsafe { (trigger.into_inner())(fence.into_inner().as_ptr()) }).await
 }
 
 #[inline]
@@ -3930,7 +3981,7 @@ where
 fn trigger_fence_async<Dpy: DisplayLike>(
     conn: &mut Display<Dpy::Connection>,
     fence: Fence,
-) -> impl Future<Output = breadx::Result>
+) -> impl Future<Output = breadx::Result> + '_
 where
     Dpy::Connection: AsyncConnection + Send,
 {
@@ -3972,7 +4023,7 @@ async fn await_on_fence<Dpy: DisplayLike>(
 where
     Dpy::Connection: AsyncConnection + Send,
 {
-    let xsmfence = xshmfence_async().await.unwrap();
+    let xshmfence = xshmfence_async().await.unwrap();
     let xawait: ThreadSafe<XshmfenceAwait> =
         unsafe { xshmfence.function(&*XSHMFENCE_AWAIT) }.unwrap();
     let shm_fence = unsafe { ThreadSafe::new(buffer.shm_fence) };
@@ -4035,7 +4086,7 @@ where
     let mut bufarc = Some(buffer);
     'tryunwraploop: loop {
         match Arc::try_unwrap(bufarc.take().unwrap()) {
-            Ok(buffer) => {
+            Ok(mut buffer) => {
                 buffer.free_async(conn, screen).await?;
                 break 'tryunwraploop Ok(());
             }
@@ -4110,7 +4161,7 @@ fn red_mask_for_depth<Conn>(dpy: &mut Display<Conn>, depth: u8) -> c_uint {
 
 #[cfg(feature = "async")]
 #[inline]
-async fn set_adaptive_sync_async<Conn: Connection>(
+async fn set_adaptive_sync_async<Conn: AsyncConnection + Send>(
     dpy: &mut Display<Conn>,
     drawable: Drawable,
     val: bool,
@@ -4241,21 +4292,25 @@ where
         // as above, so below, except in an "offload" block
         let conn = this.display.clone();
         let screen = this.screen();
-        let drawable = ThreadSafe::new(this.drawable);
+        let drawable = unsafe { ThreadSafe::new(this.drawable) };
         let mut state = mem::take(this.state.get_mut());
 
         offload::offload(async move {
-            let t1 = blocking::unblock(|| {
-                ((&*screen.inner.core).destroyDrawable.unwrap())(drawable.into_inner().as_ptr())
+            let scr2 = screen.clone();
+            let t1 = blocking::unblock(move || unsafe {
+                ((&*scr2.inner.core).destroyDrawable.unwrap())(drawable.into_inner().as_ptr())
             });
 
-            future::zip(async {
-                for buffer in (mem::take(&mut state.buffers)).iter_mut() {
-                    if let Some(buffer) = mem::take(buffer) {
-                        free_buffer_arc_async(buffer, conn.clone(), screen.clone()).await;
+            future::zip(
+                async {
+                    for buffer in (mem::take(&mut state.buffers)).iter_mut() {
+                        if let Some(buffer) = mem::take(buffer) {
+                            free_buffer_arc_async(buffer, conn.clone(), screen.clone()).await.ok();
+                        }
                     }
-                }
-            }, t1)
+                },
+                t1,
+            )
             .await;
         });
     }

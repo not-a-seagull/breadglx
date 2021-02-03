@@ -103,8 +103,6 @@ pub(crate) trait GlInternalContext<Dpy> {
 
 #[cfg(feature = "async")]
 pub(crate) trait AsyncGlInternalContext<Dpy> {
-    fn is_direct(&self) -> bool;
-
     fn bind_async<'future, 'a, 'b>(
         &'a self,
         dpy: &'b GlDisplay<Dpy>,
@@ -271,11 +269,15 @@ where
     }
 
     #[inline]
-    pub fn bind_async<Target: Into<Drawable>>(
-        &self,
-        dpy: &GlDisplay<Dpy>,
+    pub fn bind_async<'future, 'a, 'b, Target: Into<Drawable>>(
+        &'a self,
+        dpy: &'b GlDisplay<Dpy>,
         draw: Target,
-    ) -> impl Future<Output = breadx::Result<Option<GlContext<Dpy>>>> {
+    ) -> impl Future<Output = breadx::Result<Option<GlContext<Dpy>>>> + 'future
+    where
+        'a: 'future,
+        'b: 'future,
+    {
         let draw = draw.into();
         self.bind_internal_async(dpy, Some(draw), Some(draw))
     }

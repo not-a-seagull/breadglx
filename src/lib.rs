@@ -1,6 +1,5 @@
 // MIT/Apache2 License
 
-#![allow(warnings)]
 #![feature(const_fn)] // need this for creating PCI tables for DRI
 #![feature(new_uninit)] // for DRI3 we need to initialize buffers without putting stuff in them
 #![feature(raw_ref_macros)]
@@ -10,6 +9,7 @@
 #![feature(trait_alias)]
 #![cfg(all(not(target_os = "macos"), unix))]
 #![allow(non_snake_case, unused_unsafe)]
+#![deny(clippy::future_not_send)]
 
 pub(crate) mod auto;
 pub(crate) mod cstr;

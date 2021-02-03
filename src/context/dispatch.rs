@@ -113,7 +113,7 @@ where
 #[cfg(feature = "async")]
 impl<Dpy: DisplayLike> AsyncGlInternalContext<Dpy> for ContextDispatch<Dpy>
 where
-    Dpy::Connection: AsyncConnection,
+    Dpy::Connection: AsyncConnection + Send,
 {
     #[inline]
     fn bind_async<'future, 'a, 'b>(

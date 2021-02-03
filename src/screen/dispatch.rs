@@ -12,7 +12,7 @@ use breadx::{display::Connection, Drawable};
 use std::sync::Arc;
 
 #[cfg(feature = "async")]
-use crate::{screen::AsyncGlInternalScreen,util::GenericFuture};
+use crate::{screen::AsyncGlInternalScreen, util::GenericFuture};
 #[cfg(feature = "async")]
 use breadx::display::AsyncConnection;
 
@@ -94,7 +94,7 @@ where
 #[cfg(feature = "async")]
 impl<Dpy: DisplayLike> AsyncGlInternalScreen<Dpy> for ScreenDispatch<Dpy>
 where
-    Dpy::Connection: AsyncConnection,
+    Dpy::Connection: AsyncConnection + Send,
 {
     #[inline]
     fn create_context_async<'future, 'a, 'b, 'c, 'd, 'e>(
