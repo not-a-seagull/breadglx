@@ -9,6 +9,7 @@ use crate::{
     },
     display::{DisplayLike, GlDisplay},
     dri::{convert_dri_rules, ffi, DriRules, ExtensionContainer},
+    util::ThreadSafe,
 };
 use breadx::{
     display::{Connection, Display},
@@ -27,7 +28,7 @@ use std::{
 use tinyvec::ArrayVec;
 
 #[cfg(feature = "async")]
-use crate::{context::AsyncGlInternalContext, util::GenericFuture};
+use crate::{context::AsyncGlInternalContext, offload, util::GenericFuture};
 #[cfg(feature = "async")]
 use breadx::display::AsyncConnection;
 #[cfg(feature = "async")]
@@ -140,7 +141,19 @@ impl<Dpy: Send + Sync + 'static> Dri3Context<Dpy> {
 
     #[cfg(feature = "async")]
     #[inline]
-    pub async fn is_current_async(&self) -> bool {}
+    pub async fn is_current_async(&self) -> bool {
+        if let Some(ref curr) = GlContext::<Dpy>::get_async()
+            .await
+            .as_ref()
+            .and_then(|m| promote_anyarc_ref::<Dpy>(m))
+        {
+            if let ContextDispatch::Dri3(d3) = curr.dispatch() {
+                return d3.dri_context() == self.dri_context();
+            }
+        }
+
+        false
+    }
 
     #[inline]
     pub fn dri_context(&self) -> NonNull<ffi::__DRIcontext> {
@@ -360,16 +373,16 @@ where
             } else {
                 // invalidate the two drawables
                 if let Some(ref draw) = draw {
-                    Dri3Drawable::invalidate_async(draw.clone()).await;
+                    Dri3Drawable::invalidate_async(draw).await;
                 }
 
                 if let Some(read) = read {
                     if let Some(draw) = draw {
                         if !Arc::ptr_eq(&read, &draw) {
-                            Dri3Drawable::invalidate_async(read).await;
+                            Dri3Drawable::invalidate_async(&read).await;
                         }
                     } else {
-                        Dri3Drawable::invalidate_async(read).await;
+                        Dri3Drawable::invalidate_async(&read).await;
                     }
                 }
 
@@ -381,7 +394,10 @@ where
     #[inline]
     fn unbind_async<'future>(&'future self) -> GenericFuture<'future, breadx::Result> {
         let this = self.clone();
-        Box::pin(blocking::unblock(move || this.unbind_internal()))
+        Box::pin(blocking::unblock(move || {
+            this.unbind_internal();
+            Ok(())
+        }))
     }
 
     #[inline]
@@ -405,6 +421,21 @@ where
 {
     fn sync_dropper(this: &mut Dri3ContextInner<Dpy>) {
         unsafe { ((&*this.screen.inner.core).destroyContext.unwrap())(this.dri_context.as_ptr()) }
+    }
+}
+
+#[cfg(feature = "async")]
+impl<Dpy: DisplayLike> Dropper<Dpy>
+where
+    Dpy::Connection: AsyncConnection + Send,
+{
+    fn async_dropper(this: &mut Dri3ContextInner<Dpy>) {
+        let core = unsafe { ThreadSafe::new(this.screen.inner.core) };
+        let dri_context = unsafe { ThreadSafe::new(this.dri_context.as_ptr()) };
+
+        offload::offload(blocking::unblock(move || unsafe {
+            ((*core.into_inner()).destroyContext.unwrap())(dri_context.into_inner())
+        }));
     }
 }
 

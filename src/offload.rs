@@ -24,24 +24,34 @@
  to be 'static. This means we have to move all of our stuff out of the object being dropped before we call
  offload(). That's going to be a headache, especially with how often raw pointers are a part of the equation.
 
+ (In addition, I also take advantage of this to spawn hot futures inside of C function where I'm expected
+  to block. Since we have it, it's better than just calling future::block_on, so might as well.)
+
  TODO: Have a "tokio" feature that, when enabled, tries to get a tokio::Handle and spawns the task on that.
  TODO: find any other way of doing this
 */
 
 #![cfg(feature = "async")]
 
-use async_executor::Executor;
+use async_executor::{Executor, Task};
 use futures_lite::future;
-use once_cell::Lazy;
-use std::{panic, thread};
+use once_cell::sync::Lazy;
+use std::{future::Future, panic, thread};
 
-const OFFLOADER: Lazy<Executor<'static>> = Lazy::new(|| {
-    thread::Builder::new()
-        .name("breadglx-offload")
-        .spawn(|| loop {
-            panic::catch_unwind(|| future::block_on(OFFLOADER.run(future::pending::<()>()))).ok();
-        })
-        .expect("Unable to spawn offloader thread");
+static OFFLOADER: Lazy<Executor<'static>> = Lazy::new(|| {
+    // we spawn two threads. one handles the drop calls created in async contexts, the other handles
+    // hot futures in FFI calls
+    const THREAD_COUNT: usize = 2;
+
+    for i in 0..THREAD_COUNT {
+        thread::Builder::new()
+            .name(format!("breadglx-offloader-{}", i))
+            .spawn(|| loop {
+                panic::catch_unwind(|| future::block_on(OFFLOADER.run(future::pending::<()>())))
+                    .ok();
+            })
+            .expect("Unable to spawn offloader thread");
+    }
 
     Executor::new()
 });
@@ -49,4 +59,18 @@ const OFFLOADER: Lazy<Executor<'static>> = Lazy::new(|| {
 #[inline]
 pub(crate) fn offload(future: impl Future<Output = ()> + Send + 'static) {
     OFFLOADER.spawn(future).detach()
+}
+
+#[inline]
+pub(crate) fn spawn<T: Send + 'static>(
+    future: impl Future<Output = T> + Send + 'static,
+) -> Task<T> {
+    OFFLOADER.spawn(future)
+}
+
+#[inline]
+pub(crate) fn unblock<T: Send + 'static, F: FnOnce() -> T + Send + 'static>(
+    f: F,
+) -> impl Future<Output = T> {
+    blocking::unblock(f)
 }

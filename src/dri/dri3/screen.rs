@@ -11,6 +11,7 @@ use crate::{
     dll::Dll,
     dri::{config, ffi, load},
     screen::GlInternalScreen,
+    util::ThreadSafe,
 };
 use ahash::AHasher;
 use breadx::{Connection, Display, Drawable};
@@ -28,7 +29,9 @@ use std::{
 };
 
 #[cfg(feature = "async")]
-use crate::{context::AsyncGlInternalScreen, util::GenericFuture};
+use crate::{offload, screen::AsyncGlInternalScreen, util::GenericFuture};
+#[cfg(feature = "async")]
+use breadx::display::AsyncConnection;
 
 #[repr(transparent)]
 #[derive(Debug)]
@@ -357,86 +360,6 @@ where
         Self::new_blocking(dpy, scr, visuals, fbconfigs)
     }
 
-    #[cfg(feature = "async")]
-    #[inline]
-    pub async fn new_async(
-        dpy: &mut Display<Dpy::Connection>,
-        scr: usize,
-        visuals: Arc<[GlConfig]>,
-        fbconfigs: Arc<[GlConfig]>,
-    ) -> breadx::Result<Self> {
-        // first, figure out which file descriptor corresponds to our screen
-        let root = dpy.screens()[scr].root;
-        let fd = dpy.open_dri3_immediate_async(root, 0).await?;
-
-        // TODO: figure out if we need to use a different file descriptor for a different GPU
-
-        // then, open the the driver associated with the fd
-        let mut extensions = vec![];
-        let driver = load::load_dri_driver_async(fd, &mut extensions).await?;
-        extensions.push(ExtensionContainer(ptr::null()));
-
-        // assign the extensions that we need to bootstrap
-        let (core, image_driver) = get_bootstrap_extensions(&extensions)?;
-
-        // create the screen on the DRI end
-        // this is done to pin the location of the screen object on the heap
-        let mut this = Arc::new(Dri3ScreenInner {
-            driver,
-            fd,
-            is_different_gpu: false,
-            dri_screen: None,
-            core: core.0 as *const _,
-            image_driver: image_driver.0 as *const _,
-            image: ptr::null(),
-            flush: ptr::null(),
-            config: ptr::null(),
-            tex_buffer: ptr::null(),
-            renderer_query: ptr::null(),
-            interop: ptr::null(),
-            driver_configs: ptr::null_mut(),
-            dri_configmap: None,
-            drawable_map: DashMap::new(),
-            fbconfigs: fbconfigs.clone(),
-            visuals: visuals.clone(),
-            dropper: &async_dropper,
-        });
-
-        // use the image driver to actually create the screen
-        let this = blocking::unblock(move || -> breadx::Result<Arc<Dri3ScreenInner<Dpy>>> {
-            let exts = unsafe { &mut *(extensions.as_mut_slice() as *mut [ExtensionContainer]) };
-
-            let thisref = Arc::get_mut(&mut this).expect("Infallible Arc::get_mut()");
-            thisref.create_dri_screen(scr, fd, exts)?;
-
-            // now we can load up the extension
-            thisref.get_extensions()?;
-
-            let mut extmap: HashMap<u64, NonNull<ffi::__DRIconfig>> = unsafe {
-                config::convert_configs(
-                    ExtensionContainer(thisref.core as *const _),
-                    &visuals,
-                    thisref.driver_configs,
-                )
-            }
-            .collect();
-            extmap.extend(unsafe {
-                config::convert_configs(
-                    ExtensionContainer(thisref.core as *const _),
-                    &fbconfigs,
-                    thisref.driver_configs,
-                )
-            });
-
-            thisref.dri_configmap = Some(extmap);
-
-            Ok(this)
-        })
-        .await?;
-
-        Ok(Dri3Screen { inner: this })
-    }
-
     /// Get the DRI drawable associated with an X11 drawable.
     #[inline]
     pub(crate) fn fetch_dri_drawable(
@@ -488,9 +411,93 @@ where
             }
         }
     }
+}
+
+#[cfg(feature = "async")]
+impl<Dpy: DisplayLike> Dri3Screen<Dpy>
+where
+    Dpy::Connection: AsyncConnection + Send,
+{
+    #[inline]
+    pub async fn new_async(
+        dpy: &mut Display<Dpy::Connection>,
+        scr: usize,
+        visuals: Arc<[GlConfig]>,
+        fbconfigs: Arc<[GlConfig]>,
+    ) -> breadx::Result<Self> {
+        // first, figure out which file descriptor corresponds to our screen
+        let root = dpy.screens()[scr].root;
+        let fd = dpy.open_dri3_immediate_async(root, 0).await?;
+
+        // TODO: figure out if we need to use a different file descriptor for a different GPU
+
+        // then, open the the driver associated with the fd
+        let mut extensions = vec![];
+        let driver = load::load_dri_driver_async(fd, &mut extensions).await?;
+        extensions.push(ExtensionContainer(ptr::null()));
+
+        // assign the extensions that we need to bootstrap
+        let (core, image_driver) = get_bootstrap_extensions(&extensions)?;
+
+        // create the screen on the DRI end
+        // this is done to pin the location of the screen object on the heap
+        let mut this = Arc::new(Dri3ScreenInner {
+            driver,
+            fd,
+            is_different_gpu: false,
+            dri_screen: None,
+            core: core.0 as *const _,
+            image_driver: image_driver.0 as *const _,
+            image: ptr::null(),
+            flush: ptr::null(),
+            config: ptr::null(),
+            tex_buffer: ptr::null(),
+            renderer_query: ptr::null(),
+            interop: ptr::null(),
+            driver_configs: ptr::null_mut(),
+            dri_configmap: None,
+            drawable_map: ManuallyDrop::new(DashMap::new()),
+            fbconfigs: fbconfigs.clone(),
+            visuals: visuals.clone(),
+            dropper: Dropper::<Dpy>::async_dropper,
+        });
+
+        // use the image driver to actually create the screen
+        let this = blocking::unblock(move || -> breadx::Result<Arc<Dri3ScreenInner<Dpy>>> {
+            let exts = unsafe { &mut *(extensions.as_mut_slice() as *mut [ExtensionContainer]) };
+
+            let thisref = Arc::get_mut(&mut this).expect("Infallible Arc::get_mut()");
+            thisref.create_dri_screen(scr, fd, super::loader_extensions_async::<Dpy>(), exts)?;
+
+            // now we can load up the extension
+            thisref.get_extensions()?;
+
+            let mut extmap: HashMap<u64, NonNull<ffi::__DRIconfig>> = unsafe {
+                config::convert_configs(
+                    ExtensionContainer(thisref.core as *const _),
+                    &visuals,
+                    thisref.driver_configs,
+                )
+            }
+            .collect();
+            extmap.extend(unsafe {
+                config::convert_configs(
+                    ExtensionContainer(thisref.core as *const _),
+                    &fbconfigs,
+                    thisref.driver_configs,
+                )
+            });
+
+            thisref.dri_configmap = Some(extmap);
+
+            Ok(this)
+        })
+        .await?;
+
+        Ok(Dri3Screen { inner: this })
+    }
 
     /// Get the DRI drawable associated with an X11 drawable, async redox.
-    #[cfg(feature = "async")]
     #[inline]
     pub(crate) async fn fetch_dri_drawable_async(
         &self,
@@ -514,8 +521,28 @@ where
                         })
                         .ok_or(breadx::BreadError::StaticMsg("Failed to find FbConfig ID"))?,
                 };
-                let d =
-                    Dri3Drawable::new_async(&dpy, drawable, self.clone(), fbconfig.clone()).await?;
+
+                let has_multiplane = match (unsafe { self.inner.image.as_ref() }, dpy.dispatch()) {
+                    (Some(image), DisplayDispatch::Dri3(d3)) => {
+                        image.base.version >= 15
+                            && (d3.dri3_version_major() > 1
+                                || (d3.dri3_version_major() == 1 && d3.dri3_version_minor() >= 2))
+                            && (d3.present_version_major() > 1
+                                || (d3.present_version_major() == 1
+                                    && d3.present_version_minor() >= 2))
+                    }
+                    _ => false,
+                };
+
+                let d = Dri3Drawable::new_async(
+                    &dpy,
+                    drawable,
+                    self.clone(),
+                    context.clone(),
+                    fbconfig.clone(),
+                    has_multiplane,
+                )
+                .await?;
                 self.inner.drawable_map.insert(drawable, d.clone());
                 Ok(d)
             }
@@ -579,7 +606,7 @@ where
 #[cfg(feature = "async")]
 impl<Dpy: DisplayLike> AsyncGlInternalScreen<Dpy> for Dri3Screen<Dpy>
 where
-    Dpy::Connection: AsyncConnection,
+    Dpy::Connection: AsyncConnection + Send,
 {
     #[inline]
     fn create_context_async<'future, 'a, 'b, 'c, 'd, 'e>(
@@ -642,6 +669,32 @@ where
         unsafe { libc::free(screen.driver_configs as *mut _) };
 
         unsafe { libc::close(screen.fd) };
+    }
+}
+
+#[cfg(feature = "async")]
+impl<Dpy: DisplayLike> Dropper<Dpy>
+where
+    Dpy::Connection: AsyncConnection + Send,
+{
+    fn async_dropper(screen: &mut Dri3ScreenInner<Dpy>) {
+        unsafe { ManuallyDrop::drop(&mut screen.drawable_map) };
+
+        let screen_fd = screen.fd;
+        let driver_configs = unsafe { ThreadSafe::new(screen.driver_configs) };
+        let dri_screen = unsafe { ThreadSafe::new(screen.dri_screen.unwrap().as_ptr()) };
+        let destroy_screen =
+            unsafe { ThreadSafe::new((*screen.core).destroyScreen.as_ref().cloned()) };
+
+        offload::offload(blocking::unblock(move || {
+            if let Some(destroy_screen) = destroy_screen.into_inner() {
+                unsafe { (destroy_screen)(dri_screen.into_inner()) };
+            }
+
+            unsafe { iter_configs(*driver_configs, |ext| libc::free(ext as *mut _)) };
+            unsafe { libc::free(*driver_configs as *mut _) };
+            unsafe { libc::close(screen_fd) };
+        }));
     }
 }
 

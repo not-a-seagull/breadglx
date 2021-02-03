@@ -6,6 +6,7 @@ use crate::{
         dri3::{free_buffer_arc, BufferType, Dri3Drawable, MAX_BACK},
         ffi, ExtensionContainer,
     },
+    util::ThreadSafe,
 };
 use breadx::display::Connection;
 use std::{
@@ -18,7 +19,11 @@ use std::{
 };
 
 #[cfg(feature = "async")]
+use crate::offload;
+#[cfg(feature = "async")]
 use breadx::display::AsyncConnection;
+#[cfg(feature = "async")]
+use futures_lite::future;
 
 fn unimpl(name: &'static str) -> ! {
     log::error!("fill in later: {}", name);
@@ -115,7 +120,99 @@ where
     }
 }
 
+#[cfg(feature = "async")]
+unsafe extern "C" fn get_buffers_async<Dpy: DisplayLike>(
+    dri_drawable: *mut ffi::__DRIdrawable,
+    format: c_uint,
+    stamp: *mut u32,
+    loader: *mut c_void,
+    mut buffer_mask: u32,
+    buffers: *mut ffi::__DRIimageList,
+) -> c_int
+where
+    Dpy::Connection: AsyncConnection + Send,
+{
+    const __DRI_IMAGE_BUFFER_FRONT: u32 = ffi::__DRIimageBufferMask___DRI_IMAGE_BUFFER_FRONT;
+    const __DRI_IMAGE_BUFFER_BACK: u32 = ffi::__DRIimageBufferMask___DRI_IMAGE_BUFFER_BACK;
+
+    // write some of our initial values to the buffers variable
+    ptr::write(raw_mut!((*buffers).image_mask), 0);
+    ptr::write(raw_mut!((*buffers).front), ptr::null_mut());
+    ptr::write(raw_mut!((*buffers).back), ptr::null_mut());
+
+    match catch_unwind::<_, breadx::Result<c_int>>(move || {
+        let drawable = Arc::from_raw(loader as *const c_void as *const Dri3Drawable<Dpy>);
+        mem::forget(drawable.clone());
+        let buffers = unsafe { ThreadSafe::new(buffers) };
+
+        // async note: this is taking place inside of a blocking::unblock() call created by
+        //             one of the async contexts calling a C FFI function.
+        //             therefore, we're fine to block on a future (specifcally, one we spawn
+        //             on the internal breadglx executor)
+        future::block_on(offload::spawn(async move {
+            drawable.update_async().await?;
+            drawable.update_max_back_async().await;
+
+            drawable.free_back_buffers_async().await?;
+            if drawable.is_pixmap()
+                || drawable.swap_method() == ffi::__DRI_ATTRIB_SWAP_EXCHANGE as _
+            {
+                buffer_mask |= __DRI_IMAGE_BUFFER_FRONT as u32;
+            }
+
+            if buffer_mask & __DRI_IMAGE_BUFFER_FRONT as u32 == 0 {
+                drawable.free_buffers_async(BufferType::Front).await?;
+                drawable.set_have_fake_front(false);
+            } else {
+                let not_fake_front = drawable.is_pixmap() && !drawable.is_different_gpu();
+                let buffer = if not_fake_front {
+                    drawable
+                        .get_pixmap_buffer_async(BufferType::Front, format)
+                        .await?
+                } else {
+                    drawable.get_buffer_async(BufferType::Front, format).await?
+                };
+
+                let buffers = unsafe { &mut *buffers.into_inner() };
+                buffers.image_mask |= __DRI_IMAGE_BUFFER_FRONT as u32;
+                buffers.front = buffer.image.as_ptr();
+                drawable.set_have_fake_front(!not_fake_front);
+            }
+
+            if buffer_mask & __DRI_IMAGE_BUFFER_BACK as u32 == 0 {
+                drawable.free_buffers_async(BufferType::Back).await?;
+                drawable.set_have_back(false);
+            } else {
+                let back = drawable.get_buffer_async(BufferType::Back, format).await?;
+                drawable.set_have_back(true);
+                let buffers = unsafe { &mut *buffers.into_inner() };
+                buffers.image_mask |= __DRI_IMAGE_BUFFER_BACK as u32;
+                buffers.back = back.image.as_ptr();
+            }
+
+            Ok(1)
+        }))
+    }) {
+        Err(_) => {
+            log::error!("get_buffers_async panicked during catch_unwind!");
+            abort()
+        }
+        Ok(Err(e)) => {
+            log::error!("get_buffers_async resolved to error: {:?}", e);
+            0
+        }
+        Ok(Ok(res)) => res,
+    }
+}
+
 unsafe extern "C" fn flush_front_buffer<Dpy: DisplayLike>(
+    dri_drawable: *mut ffi::__DRIdrawable,
+    loader: *mut c_void,
+) {
+    unimpl("flush_front_buffer")
+}
+
+unsafe extern "C" fn flush_front_buffer_async<Dpy: DisplayLike>(
     dri_drawable: *mut ffi::__DRIdrawable,
     loader: *mut c_void,
 ) {
@@ -129,8 +226,19 @@ unsafe extern "C" fn flush_swap_buffers<Dpy: DisplayLike>(
     unimpl("flush_swap_buffers")
 }
 
+unsafe extern "C" fn flush_swap_buffers_async<Dpy: DisplayLike>(
+    dri_drawable: *mut ffi::__DRIdrawable,
+    loader: *mut c_void,
+) {
+    unimpl("flush_swap_buffers")
+}
+
 /* Implementation of Background Callable extension functions */
 unsafe extern "C" fn set_background_context<Dpy: DisplayLike>(loader: *mut c_void) {
+    unimpl("set_background_context")
+}
+
+unsafe extern "C" fn set_background_context_async<Dpy: DisplayLike>(loader: *mut c_void) {
     unimpl("set_background_context")
 }
 

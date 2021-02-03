@@ -3,10 +3,13 @@
 use std::{
     env,
     ops::{Deref, DerefMut},
+    ptr::NonNull,
 };
 
 #[cfg(feature = "async")]
-use std::{future::Future, pin::Pin};
+use crate::offload;
+#[cfg(feature = "async")]
+use std::{future::Future, marker::PhantomData, pin::Pin};
 
 /*#[cfg(feature = "dri")]
 mod fence;
@@ -48,28 +51,8 @@ impl<F: FnOnce()> Drop for CallOnDrop<F> {
     }
 }
 
-/// Offload an async function on drop.
-#[cfg(feature = "async")]
-pub(crate) struct OffloadOnDrop<Fut, F = fn() -> Fut>(Option<F>, PhantomData<Fut>);
-
-#[cfg(feature = "async")]
-impl<Fut, F> OffloadOnDrop<F> {
-    #[inline]
-    pub fn new(f: F) -> Self {
-        Self(Some(f), PhantomData)
-    }
-}
-
-#[cfg(feature = "async")]
-impl<Fut: Future<Output = ()> + Send, F: FnOnce() -> Fut> Drop for OffloadOnDrop<Fut, F> {
-    #[inline]
-    fn drop(&mut self) {
-        offload::offload((self.0.take().unwrap())());
-    }
-}
-
 /// Mark an object that usually isn't thread safe as thread safe.
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub(crate) struct ThreadSafe<T: ?Sized>(T);
 
@@ -90,6 +73,30 @@ impl<T> ThreadSafe<T> {
     #[inline]
     pub fn into_inner(self) -> T {
         self.0
+    }
+}
+
+impl<T> ThreadSafe<Option<T>> {
+    /// Convert this threadsafe containing an option to an option containing a threadsafe.
+    #[inline]
+    pub fn into_option(self) -> Option<ThreadSafe<T>> {
+        // SAFETY: the caller has already guaranteed thread safety
+        match self.into_inner() {
+            Some(a) => Some(unsafe { ThreadSafe::new(a) }),
+            None => None,
+        }
+    }
+}
+
+impl<T: ?Sized> ThreadSafe<*mut T> {
+    /// Convert to a non-null pointer.
+    #[inline]
+    pub fn into_non_null(self) -> Option<ThreadSafe<NonNull<T>>> {
+        // SAFETY: same as above
+        match NonNull::new(self.into_inner()) {
+            Some(a) => Some(unsafe { ThreadSafe::new(a) }),
+            None => None,
+        }
     }
 }
 

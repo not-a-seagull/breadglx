@@ -14,7 +14,9 @@ use breadx::{
 use std::{boxed::Box, fmt, marker::PhantomData, os::raw::c_int, sync::Arc};
 
 #[cfg(feature = "async")]
-use crate::util::GenericFuture;
+use crate::{display::AsyncGlInternalDisplay, util::GenericFuture};
+#[cfg(feature = "async")]
+use breadx::display::AsyncConnection;
 #[cfg(feature = "async")]
 use futures_lite::future;
 
@@ -84,8 +86,13 @@ where
             _phantom: PhantomData,
         })
     }
+}
 
-    #[cfg(feature = "async")]
+#[cfg(feature = "async")]
+impl<Dpy: DisplayLike> Dri3Display<Dpy>
+where
+    Dpy::Connection: AsyncConnection + Send,
+{
     #[inline]
     pub(crate) async fn new_async(dpy: &mut Display<Dpy::Connection>) -> breadx::Result<Self> {
         // query whether or not the extension's versions are present
@@ -127,9 +134,9 @@ where
 }
 
 #[cfg(feature = "async")]
-impl<Dpy: DisplayLike> GlInternalDisplay<Dpy> for Dri3Display<Dpy>
+impl<Dpy: DisplayLike> AsyncGlInternalDisplay<Dpy> for Dri3Display<Dpy>
 where
-    Dpy::Connection: AsyncConnection,
+    Dpy::Connection: AsyncConnection + Send,
 {
     #[inline]
     fn create_screen_async<'future, 'a, 'b>(

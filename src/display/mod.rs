@@ -383,9 +383,7 @@ where
     ) -> breadx::Result<Option<u32>> {
         // NOTE: DashMap doesn't actually block, it just spins. So we're safe to not push each instance
         //       of DashMap::get() into the blocking threadpool
-        let this = self.clone();
-
-        let map = match self.inner.drawable_properties.get(&drawable).as_deref() {
+        let map = match self.inner.drawable_properties.get(&drawable) {
             Some(map) => map,
             None => {
                 let repl = self
@@ -394,15 +392,13 @@ where
                     .get_drawable_properties_immediate_async(drawable.into())
                     .await?;
 
-                self.inner.drawable_properties.insert(
-                    drawable,
-                    Arc::new(repl.chunks(2).map(|kv| (kv[0], kv[1])).collect()),
-                );
+                self.inner
+                    .drawable_properties
+                    .insert(drawable, repl.chunks(2).map(|kv| (kv[0], kv[1])).collect());
                 self.inner
                     .drawable_properties
                     .get(&drawable)
                     .expect("Infallible DashMap::get()")
-                    .clone();
             }
         };
 
@@ -418,6 +414,11 @@ where
             .display_mut()
             .query_glx_version_immediate_async(1, 1)
             .await?;
+        if major_version != 1 || minor_version < 1 {
+            return Err(breadx::BreadError::StaticMsg(
+                "breadglx is not compatible with GLX v1.0",
+            ));
+        }
 
         let mut context: Option<dispatch::DisplayDispatch<Dpy>> = None;
 

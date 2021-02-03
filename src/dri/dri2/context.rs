@@ -46,7 +46,7 @@ where
 }
 
 #[cfg(feature = "async")]
-impl<Dpy: DisplayLike> AsyncGlInternalContext<Dpy> for Dri3Context<Dpy>
+impl<Dpy: DisplayLike> AsyncGlInternalContext<Dpy> for Dri2Context<Dpy>
 where
     Dpy::Connection: AsyncConnection + Send,
 {

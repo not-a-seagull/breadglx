@@ -21,21 +21,18 @@ use std::{
 #[cfg(feature = "async")]
 use crate::util::GenericFuture;
 #[cfg(feature = "async")]
+use async_lock::RwLockReadGuard;
+#[cfg(feature = "async")]
 use breadx::display::AsyncConnection;
 #[cfg(feature = "async")]
 use core::future::Future;
+#[cfg(feature = "async")]
+use futures_lite::future;
 
 mod attrib;
 pub use attrib::*;
 pub(crate) mod dispatch;
 pub(crate) use dispatch::ContextDispatch;
-
-#[cfg(feature = "async")]
-use async_lock::RwLockReadGuard;
-#[cfg(feature = "async")]
-use breadx::display::AsyncConnection;
-#[cfg(feature = "async")]
-use futures_lite::future;
 
 #[cfg(not(feature = "async"))]
 use once_cell::sync::OnceCell;
@@ -106,8 +103,6 @@ pub(crate) trait GlInternalContext<Dpy> {
 
 #[cfg(feature = "async")]
 pub(crate) trait AsyncGlInternalContext<Dpy> {
-    fn is_direct(&self) -> bool;
-
     fn bind_async<'future, 'a, 'b>(
         &'a self,
         dpy: &'b GlDisplay<Dpy>,
@@ -161,6 +156,11 @@ impl<Dpy> GlContext<Dpy> {
     #[inline]
     pub(crate) fn get() -> RwLockReadGuard<'static, Option<AnyArc>> {
         get_current_context()
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) fn get_async() -> impl Future<Output = RwLockReadGuard<'static, Option<AnyArc>>> {
+        get_current_context_async()
     }
 }
 
@@ -269,11 +269,15 @@ where
     }
 
     #[inline]
-    pub fn bind_async<Target: Into<Drawable>>(
-        &self,
-        dpy: &GlDisplay<Dpy>,
+    pub fn bind_async<'future, 'a, 'b, Target: Into<Drawable>>(
+        &'a self,
+        dpy: &'b GlDisplay<Dpy>,
         draw: Target,
-    ) -> impl Future<Output = breadx::Result<Option<GlContext<Dpy>>>> {
+    ) -> impl Future<Output = breadx::Result<Option<GlContext<Dpy>>>> + 'future
+    where
+        'a: 'future,
+        'b: 'future,
+    {
         let draw = draw.into();
         self.bind_internal_async(dpy, Some(draw), Some(draw))
     }

@@ -13,7 +13,7 @@ use breadx::{
 use std::ffi::CStr;
 
 #[cfg(feature = "async")]
-use crate::util::GenericFuture;
+use crate::{context::AsyncGlInternalContext, util::GenericFuture};
 #[cfg(feature = "async")]
 use breadx::display::AsyncConnection;
 
@@ -113,7 +113,7 @@ where
 #[cfg(feature = "async")]
 impl<Dpy: DisplayLike> AsyncGlInternalContext<Dpy> for ContextDispatch<Dpy>
 where
-    Dpy::Connection: AsyncConnection,
+    Dpy::Connection: AsyncConnection + Send,
 {
     #[inline]
     fn bind_async<'future, 'a, 'b>(
@@ -149,7 +149,7 @@ where
     }
 
     #[inline]
-    fn get_proc_address<'future, 'a, 'b>(
+    fn get_proc_address_async<'future, 'a, 'b>(
         &'a self,
         name: &'b CStr,
     ) -> GenericFuture<'future, Option<ProcAddress>>

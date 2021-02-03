@@ -9,6 +9,7 @@
 #![feature(trait_alias)]
 #![cfg(all(not(target_os = "macos"), unix))]
 #![allow(non_snake_case, unused_unsafe)]
+#![deny(clippy::future_not_send)]
 
 pub(crate) mod auto;
 pub(crate) mod cstr;

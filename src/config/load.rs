@@ -6,6 +6,9 @@ use std::convert::TryInto;
 
 const U32_NO_FIT: &str = "u32 doesn't fit in usize";
 
+#[cfg(feature = "async")]
+use breadx::display::AsyncConnection;
+
 impl GlConfig {
     #[inline]
     pub(crate) fn get_visuals_and_fbconfigs<Conn: Connection>(
@@ -38,7 +41,7 @@ impl GlConfig {
 
     #[cfg(feature = "async")]
     #[inline]
-    pub(crate) async fn get_visuals_and_fbconfigs_async<Conn: Connection>(
+    pub(crate) async fn get_visuals_and_fbconfigs_async<Conn: AsyncConnection + Send>(
         dpy: &mut Display<Conn>,
         screen: usize,
     ) -> breadx::Result<(Vec<GlConfig>, Vec<GlConfig>)> {
