@@ -45,7 +45,8 @@ impl Dll {
             Some(func) => Some(mem::transmute_copy::<_, T>(&*func)),
             None => {
                 // load symbol from library
-                let sym: NonNull<c_void> = unsafe { self.lib.get(name.to_bytes_with_nul()).ok()?.into_raw() };
+                let sym: NonNull<c_void> =
+                    unsafe { self.lib.get(name.to_bytes_with_nul()).ok()?.into_raw() };
                 self.funcs.insert(name.into(), sym.clone());
                 Some(mem::transmute_copy::<_, T>(&sym))
             }
