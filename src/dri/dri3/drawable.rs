@@ -4305,7 +4305,9 @@ where
                 async {
                     for buffer in (mem::take(&mut state.buffers)).iter_mut() {
                         if let Some(buffer) = mem::take(buffer) {
-                            free_buffer_arc_async(buffer, conn.clone(), screen.clone()).await.ok();
+                            free_buffer_arc_async(buffer, conn.clone(), screen.clone())
+                                .await
+                                .ok();
                         }
                     }
                 },
