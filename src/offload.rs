@@ -41,7 +41,7 @@ use std::{future::Future, panic, thread};
 static OFFLOADER: Lazy<Executor<'static>> = Lazy::new(|| {
     // we spawn two threads. one handles the drop calls created in async contexts, the other handles
     // hot futures in FFI calls
-    const THREAD_COUNT: usize = 2;
+    const THREAD_COUNT: usize = 1;
 
     for i in 0..THREAD_COUNT {
         thread::Builder::new()
