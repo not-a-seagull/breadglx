@@ -1,7 +1,7 @@
 // MIT/Apache2 License
 
 use dashmap::DashMap;
-use dlopen::raw::Library;
+use libloading::{Library, Symbol};
 use std::{
     ffi::{c_void, CStr, OsStr},
     fmt, mem,
@@ -23,7 +23,10 @@ impl Dll {
     /// Load a new Dll.
     #[inline]
     pub fn load<A: AsRef<OsStr>>(dbg_libname: &'static str, paths: &[A]) -> breadx::Result<Self> {
-        let lib = match paths.iter().find_map(|path| Library::open(path).ok()) {
+        let lib = match paths
+            .iter()
+            .find_map(|path| unsafe { Library::new(path) }.ok())
+        {
             Some(lib) => lib,
             None => return Err(breadx::BreadError::LoadLibraryFailed(dbg_libname)),
         };
@@ -45,8 +48,13 @@ impl Dll {
             Some(func) => Some(mem::transmute_copy::<_, T>(&*func)),
             None => {
                 // load symbol from library
-                let sym: NonNull<c_void> = unsafe { self.lib.symbol_cstr(name) }.ok()?;
-                self.funcs.insert(name.into(), sym.clone());
+                let sym: NonNull<c_void> = unsafe {
+                    self.lib
+                        .get::<'_, Option<NonNull<c_void>>>(name.to_bytes_with_nul())
+                }
+                .ok()
+                .and_then(|t| *t)?;
+                self.funcs.insert(name.into(), sym);
                 Some(mem::transmute_copy::<_, T>(&sym))
             }
         }
