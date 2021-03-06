@@ -14,7 +14,7 @@ use std::{
     os::raw::{c_int, c_uint, c_void},
     panic::catch_unwind,
     process::abort,
-    ptr::{self, raw_mut},
+    ptr::{self, addr_of_mut as raw_mut},
     sync::Arc,
 };
 

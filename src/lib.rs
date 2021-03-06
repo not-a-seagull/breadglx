@@ -2,8 +2,6 @@
 
 #![feature(const_fn)] // need this for creating PCI tables for DRI
 #![feature(new_uninit)] // for DRI3 we need to initialize buffers without putting stuff in them
-#![feature(raw_ref_macros)]
-// need this for partial initialization of uninit memory
 // makes things about 100 times more convenient, could be removed
 // but since we're already pinned to nightly, why not?
 #![feature(trait_alias)]

@@ -6,7 +6,7 @@ use std::{
     convert::TryFrom,
     mem::MaybeUninit,
     os::raw::{c_int, c_uint},
-    ptr::{self, raw_mut},
+    ptr::{self, addr_of_mut as raw_mut},
 };
 
 mod compatible;

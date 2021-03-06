@@ -24,7 +24,7 @@ use std::{
     hash::{Hash, Hasher},
     mem::ManuallyDrop,
     os::raw::c_int,
-    ptr::{self, raw_const, NonNull},
+    ptr::{self, addr_of as raw_const, NonNull},
     sync::{Arc, Weak},
 };
 
